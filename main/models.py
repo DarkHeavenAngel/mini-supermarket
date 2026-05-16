@@ -1,9 +1,14 @@
 from django.core.exceptions import ValidationError
-from django.db import models
-from django.db.models import CheckConstraint, Q
-from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.core.validators import RegexValidator
+
+from django.db import models
+from django.db.models import Max, IntegerField
+from django.db.models import CheckConstraint, Q
+from django.db.models.functions import Cast
+
+from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from datetime import date
+from django.utils import timezone
 
 #Validators
 phone_validator = RegexValidator(regex=r'^\+380', message="Phone number must be entered in the format: +38012345678")
@@ -95,12 +100,23 @@ class CustomerCard(models.Model):
         ]
 
 class Check(models.Model):
-    check_number = models.CharField(primary_key=True, max_length=10)
+    check_number = models.CharField(primary_key=True, max_length=10, blank=True)
     id_employee = models.ForeignKey(Employee, on_delete=models.PROTECT, verbose_name='Код працівника', db_column='id_employee')
     card_number = models.ForeignKey(CustomerCard, on_delete=models.PROTECT, verbose_name='Номер карти лояльності', blank=True, null=True, db_column='card_number')
-    print_date = models.DateTimeField('Дата створення')
-    sum_total = models.DecimalField('Сума', decimal_places=4, max_digits=13)
-    vat = models.DecimalField('ПДВ', decimal_places=4, max_digits=13)
+    print_date = models.DateTimeField('Дата створення', default=timezone.now)
+    sum_total = models.DecimalField('Сума', decimal_places=4, max_digits=13, default=0)
+    vat = models.DecimalField('ПДВ', decimal_places=4, max_digits=13, default=0)
+
+    # автоматизація номеру чеку
+    def save(self, *args, **kwargs):
+        if not self.check_number:
+            max_check = Check.objects.annotate(
+                check_int=Cast('check_number', output_field=IntegerField())
+            ).aggregate(Max('check_int'))['check_int__max']
+
+            next_number = (max_check or 0) + 1
+            self.check_number = str(next_number).zfill(10)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.check_number
@@ -115,7 +131,7 @@ class Check(models.Model):
         ]
 
 class Category(models.Model):
-    category_number = models.IntegerField(primary_key=True)
+    category_number = models.AutoField(primary_key=True, verbose_name='Номер категорії')
     category_name = models.CharField('Назва', max_length=50)
 
     def __str__(self):
@@ -127,7 +143,7 @@ class Category(models.Model):
         verbose_name_plural = 'Категорії'
 
 class Product(models.Model):
-    id_product = models.IntegerField(primary_key=True)
+    id_product = models.AutoField(primary_key=True, verbose_name='ID продукту')
     category_number = models.ForeignKey(Category, on_delete=models.PROTECT, verbose_name='Номер категорії', db_column='category_number')
     product_name = models.CharField('Назва', max_length=50)
     characteristics = models.CharField('Опис', max_length=100)
@@ -145,9 +161,15 @@ class StoreProduct(models.Model):
     upc = models.CharField(primary_key=True, max_length=12)
     upc_prom = models.ForeignKey('self', on_delete=models.SET_NULL, blank=True, null=True, db_column='upc_prom', related_name='promotional_copies')
     id_product = models.ForeignKey(Product, on_delete=models.PROTECT, db_column='id_product')
-    selling_price = models.DecimalField('Ціна', decimal_places=4, max_digits=13)
+    selling_price = models.DecimalField('Ціна', decimal_places=4, max_digits=13, default=0)
     products_number = models.IntegerField('Кількість одиниць')
     promotional_product = models.BooleanField('Акційний продукт', default=False)
+
+    def save(self, *args, **kwargs):
+        if self.promotional_product and self.upc_prom:
+            discounted_price = float(self.upc_prom.selling_price) * 0.8
+            self.selling_price = discounted_price
+        super().save(*args, **kwargs)
 
     def __str__(self):
         if self.promotional_product:
@@ -170,6 +192,19 @@ class Sale(models.Model):
     check_number = models.ForeignKey(Check, on_delete=models.CASCADE, db_column='check_number')
     product_number = models.IntegerField('Кількість одиниць')
     selling_price = models.DecimalField('Ціна', decimal_places=4, max_digits=13)
+
+    # авто списання товару та підтягування ціни
+    def save(self, *args, **kwargs):
+        is_new = self.pk is None
+
+        if not self.selling_price:
+            self.selling_price = self.upc.selling_price
+        super().save(*args, **kwargs)
+
+        if is_new:
+            store_product = self.upc
+            store_product.products_number -= self.product_number
+            store_product.save()
 
     class Meta:
         db_table = 'Sale'
