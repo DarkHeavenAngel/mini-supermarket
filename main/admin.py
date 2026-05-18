@@ -3,6 +3,11 @@ from django.contrib.auth.models import Group
 from .models import (Employee, CustomerCard, Check, Category, Product, StoreProduct, Sale)
 from decimal import Decimal
 
+"""
+нагадую, що всі методи для обчислення, які я тут прописую (або в моделях) потрібні лише для адмінки, щоб було зручно тестувати
+все це не виконує вимог і треба буде окремо прописувати код з запитами на обчислення і тд у в'юсі
+"""
+
 class SaleInline(admin.TabularInline):
     model = Sale
     extra = 1

@@ -11,18 +11,18 @@ from datetime import date
 from django.utils import timezone
 
 #Validators
-phone_validator = RegexValidator(regex=r'^\+380', message="Phone number must be entered in the format: +38012345678")
+phone_validator = RegexValidator(regex=r'^\+380', message="Номер телефону потрібно ввести у форматі: +38012345678")
 
 def validate_employee_age(born):
     today = date.today()
     age = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
     if age < 18:
-        raise ValidationError("Employee age must be at least 18")
+        raise ValidationError("Вік працівника повинен становити не менше 18 років")
 
 class EmployeeManager(BaseUserManager):
     def create_user(self, id_employee, password=None, **extra_fields):
         if not id_employee:
-            raise ValueError('Employee ID is required')
+            raise ValueError('Необхідно ввести ідентифікаційний номер співробітника')
         user = self.model(id_employee=id_employee, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
@@ -164,6 +164,27 @@ class StoreProduct(models.Model):
     selling_price = models.DecimalField('Ціна', decimal_places=4, max_digits=13, default=0)
     products_number = models.IntegerField('Кількість одиниць')
     promotional_product = models.BooleanField('Акційний продукт', default=False)
+
+    # валідація кількості записів товару
+    def clean(self):
+        super().clean()
+
+        if self.id_product:
+            queryset = StoreProduct.objects.filter(id_product=self.id_product)
+
+            if self.pk:
+                queryset = queryset.exclude(pk=self.pk)
+
+            if queryset.count() >= 2:
+                raise ValidationError(
+                    "Для цього товару вже існує максимально можлива кількість записів (звичайний та акційний)"
+                )
+
+            if queryset.filter(promotional_product=self.promotional_product).exists():
+                status_str = "акційний" if self.promotional_product else "звичайний"
+                raise ValidationError(
+                    f"Для цього товару вже існує {status_str} варіант. Оберіть інший статус"
+                )
 
     def save(self, *args, **kwargs):
         if self.promotional_product and self.upc_prom:
