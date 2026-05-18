@@ -1,6 +1,7 @@
 from decimal import Decimal
 from django.db import connection, transaction
-from datetime import timezone, datetime, date
+from datetime import datetime, date
+from django.utils import timezone
 import re
 
 def store_product(upc, id_product, selling_price, products_number, is_promotional=False, upc_prom=None):
@@ -62,7 +63,7 @@ def create_new_check(check_number, id_employee, card_number, items_list):
 
         # автоматизація номеру чеку
         if not check_number:
-            cursor.execute("SELECT MAX(check_number AS INTEGER)) FROM StoreCheck")
+            cursor.execute("SELECT MAX(CAST(check_number AS INTEGER)) FROM StoreCheck")
             max_check = cursor.fetchone()[0]
             next_number = (max_check or 0) + 1
             check_number = str(next_number).zfill(10)
