@@ -2,6 +2,12 @@ from decimal import Decimal
 from django.db import connection, transaction
 from datetime import timezone, datetime, date
 import re
+from rest_framework import viewsets
+from .models import Employee, Product, Check, Category, StoreProduct, CustomerCard, Sale
+from .serializers import (
+    EmployeeSerializer, ProductSerializer, CheckSerializer,
+    CategorySerializer, StoreProductSerializer, CustomerCardSerializer, SaleSerializer
+)
 
 def store_product(upc, id_product, selling_price, products_number, is_promotional=False, upc_prom=None):
     with connection.cursor() as cursor:
@@ -172,3 +178,31 @@ def add_new_employee(id_employee, empl_surname, empl_name, empl_role, salary, da
 
         except Exception as e:
             return {"success": False, "error": f"Помилка бази даних: {str(e)}"}
+
+class EmployeeViewSet(viewsets.ModelViewSet):
+    queryset = Employee.objects.all()
+    serializer_class = EmployeeSerializer
+
+class ProductViewSet(viewsets.ModelViewSet):
+    queryset = Product.objects.all()
+    serializer_class = ProductSerializer
+
+class CheckViewSet(viewsets.ModelViewSet):
+    queryset = Check.objects.all()
+    serializer_class = CheckSerializer
+
+class CategoryViewSet(viewsets.ModelViewSet):
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+
+class StoreProductViewSet(viewsets.ModelViewSet):
+    queryset = StoreProduct.objects.all()
+    serializer_class = StoreProductSerializer
+
+class CustomerCardViewSet(viewsets.ModelViewSet):
+    queryset = CustomerCard.objects.all()
+    serializer_class = CustomerCardSerializer
+
+class  SaleViewSet(viewsets.ModelViewSet):
+    queryset =  Sale.objects.all()
+    serializer_class =  SaleSerializer
