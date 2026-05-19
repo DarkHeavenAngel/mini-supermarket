@@ -38,25 +38,6 @@ def store_product(upc, id_product, selling_price, products_number, is_promotiona
 
         return {"success": True, "message": 'Product added successfully'}
 
-def promotional_product(normal_upc, promo_upc, quantity):
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT selling_price, id_product FROM StoreProduct WHERE upc = %s", [normal_upc]
-        )
-        row = cursor.fetchone()
-
-        if row:
-            normal_price = row[0]
-            product_id = row[1]
-
-            promo_price = normal_price * Decimal('0.8')
-
-            cursor.execute("""
-                INSERT INTO StoreProduct 
-                    (upc, upc_prom, id_product, selling_price, products_number, promotional_product)
-                    VALUES (%s, %s, %s, %s, %s, True)
-                           """, [promo_upc, normal_upc, product_id, promo_price, quantity])
-
 @transaction.atomic
 def create_new_check(check_number, id_employee, card_number, items_list):
     with connection.cursor() as cursor:
