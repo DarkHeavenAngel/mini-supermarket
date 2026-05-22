@@ -1,8 +1,14 @@
+import json
 from decimal import Decimal
 from django.db import connection, transaction
 from datetime import datetime, date
+
+from django.http import JsonResponse
 from django.utils import timezone
 import re
+
+from django.views.decorators.csrf import csrf_exempt
+
 
 def store_product(upc, id_product, selling_price, products_number, is_promotional=False, upc_prom=None):
     with connection.cursor() as cursor:
@@ -154,3 +160,33 @@ def add_new_employee(id_employee, empl_surname, empl_name, empl_role, salary, da
 
         except Exception as e:
             return {"success": False, "error": f"Помилка бази даних: {str(e)}"}
+
+@csrf_exempt # тимчасово використаю це для виклику csrf без токена
+def api_employees(request):
+    if request.method == "POST":
+        try:
+            data = json.loads(request.body)
+
+            result = add_new_employee(
+                id_employee=data.get('id_employee'),
+                empl_surname=data.get('empl_surname'),
+                empl_name=data.get('empl_name'),
+                empl_role=data.get('empl_role'),
+                salary=Decimal('salary'),
+                date_of_birth=data.get('date_of_birth'),
+                date_of_start=data.get('date_of_start'),
+                phone_number=data.get('phone_number'),
+                city=data.get('city'),
+                street=data.get('street'),
+                zip_code=data.get('zip_code')
+            )
+
+            status_code = 201 if result['success'] else 400
+            return JsonResponse(result, status=status_code)
+
+        except Exception as e:
+            return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+    elif request.method == "GET":
+        # sql запит сюди :)
+        pass
