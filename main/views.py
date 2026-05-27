@@ -9,6 +9,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 import re
 from rest_framework import viewsets, status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -172,6 +173,27 @@ def add_new_employee(id_employee, empl_surname, empl_name, empl_role, salary, da
 
         except Exception as e:
             return {"success": False, "error": f"Помилка бази даних: {str(e)}"}
+
+#Functiobn to show profile
+class EmployeeProfileAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        my_id = request.user.id_employee
+
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id_employee, empl_surname, empl_name, empl_patronymic, 
+                       empl_role, salary, date_of_birth, date_of_start, 
+                       phone_number, city, street, zip_code 
+                FROM Employee WHERE id_employee = %s
+            """, [my_id])
+            row = dictfetchall(cursor)
+
+        if not row:
+            return Response({"detail": "Профіль не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(row[0], status=status.HTTP_200_OK)
 
 #Допоміжна функція для перетворення результатів SQL-запиту в список словників (JSON)
 def dictfetchall(cursor):
