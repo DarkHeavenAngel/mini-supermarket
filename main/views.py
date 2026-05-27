@@ -54,13 +54,6 @@ def store_product(upc, id_product, selling_price, products_number, is_promotiona
 def create_new_check(check_number, id_employee, card_number, items_list):
     with connection.cursor() as cursor:
 
-        # автоматизація номеру чеку
-        if not check_number:
-            cursor.execute("SELECT MAX(CAST(check_number AS INTEGER)) FROM StoreCheck")
-            max_check = cursor.fetchone()[0]
-            next_number = (max_check or 0) + 1
-            check_number = str(next_number).zfill(10)
-
         # підрахунок суми
         subtotal = Decimal('0.0')
         for item in items_list:

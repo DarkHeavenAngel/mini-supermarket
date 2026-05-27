@@ -39,7 +39,7 @@ class Employee(AbstractBaseUser, PermissionsMixin):
         ('Касир', 'Касир')
     ]
 
-    id_employee = models.CharField(primary_key=True, max_length=10)
+    id_employee = models.AutoField(primary_key=True, max_length=10)
     empl_surname = models.CharField('Прізвище', max_length=50)
     empl_name = models.CharField('Ім*я', max_length=50)
     empl_patronymic = models.CharField('Побатькові', max_length=50, blank=True, null=True)
@@ -77,7 +77,7 @@ class Employee(AbstractBaseUser, PermissionsMixin):
         ]
 
 class CustomerCard(models.Model):
-    card_number = models.CharField(primary_key=True, max_length=13)
+    card_number = models.AutoField(primary_key=True, max_length=13)
     cust_surname = models.CharField('Прізвище', max_length=50)
     cust_name = models.CharField('Ім*я', max_length=50)
     cust_patronymic = models.CharField('Побатькові', max_length=50, blank=True, null=True)
@@ -100,7 +100,7 @@ class CustomerCard(models.Model):
         ]
 
 class Check(models.Model):
-    check_number = models.CharField(primary_key=True, max_length=10, blank=True)
+    check_number = models.AutoField(primary_key=True, max_length=10, blank=True)
     id_employee = models.ForeignKey(Employee, on_delete=models.PROTECT, verbose_name='Код працівника', db_column='id_employee')
     card_number = models.ForeignKey(CustomerCard, on_delete=models.PROTECT, verbose_name='Номер карти лояльності', blank=True, null=True, db_column='card_number')
     print_date = models.DateTimeField('Дата створення', default=timezone.now)
