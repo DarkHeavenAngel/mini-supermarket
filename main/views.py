@@ -3,6 +3,12 @@ from django.db import connection, transaction
 from datetime import datetime, date
 from django.utils import timezone
 import re
+from rest_framework import viewsets
+from .models import Employee, Product, Check, Category, StoreProduct, CustomerCard, Sale
+from .serializers import (
+    EmployeeSerializer, ProductSerializer, CheckSerializer,
+    CategorySerializer, StoreProductSerializer, CustomerCardSerializer, SaleSerializer
+)
 
 def store_product(upc, id_product, selling_price, products_number, is_promotional=False, upc_prom=None):
     with connection.cursor() as cursor:
