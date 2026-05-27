@@ -1,13 +1,19 @@
 import json
 from decimal import Decimal
+
+from django.contrib.auth.hashers import make_password
 from django.db import connection, transaction
 from datetime import datetime, date
 
 from django.http import JsonResponse
 from django.utils import timezone
 import re
-from rest_framework import viewsets
+from rest_framework import viewsets, status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
 from .models import Employee, Product, Check, Category, StoreProduct, CustomerCard, Sale
+from .permissions import IsManager, IsCashier
 from .serializers import (
     EmployeeSerializer, ProductSerializer, CheckSerializer,
     CategorySerializer, StoreProductSerializer, CustomerCardSerializer, SaleSerializer
@@ -53,6 +59,13 @@ def store_product(upc, id_product, selling_price, products_number, is_promotiona
 @transaction.atomic
 def create_new_check(check_number, id_employee, card_number, items_list):
     with connection.cursor() as cursor:
+
+        # автоматизація номеру чеку
+        if not check_number:
+            cursor.execute("SELECT MAX(CAST(check_number AS INTEGER)) FROM StoreCheck")
+            max_check = cursor.fetchone()[0]
+            next_number = (max_check or 0) + 1
+            check_number = str(next_number).zfill(10)
 
         # підрахунок суми
         subtotal = Decimal('0.0')
@@ -160,32 +173,90 @@ def add_new_employee(id_employee, empl_surname, empl_name, empl_role, salary, da
         except Exception as e:
             return {"success": False, "error": f"Помилка бази даних: {str(e)}"}
 
-@csrf_exempt # тимчасово використаю це для виклику csrf без токена
-def api_employees(request):
-    if request.method == "POST":
-        try:
-            data = json.loads(request.body)
+#Допоміжна функція для перетворення результатів SQL-запиту в список словників (JSON)
+def dictfetchall(cursor):
+    columns = [col[0] for col in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-            result = add_new_employee(
-                id_employee=data.get('id_employee'),
-                empl_surname=data.get('empl_surname'),
-                empl_name=data.get('empl_name'),
-                empl_role=data.get('empl_role'),
-                salary=Decimal('salary'),
-                date_of_birth=data.get('date_of_birth'),
-                date_of_start=data.get('date_of_start'),
-                phone_number=data.get('phone_number'),
-                city=data.get('city'),
-                street=data.get('street'),
-                zip_code=data.get('zip_code')
-            )
+#CRUD for employees
+class EmployeeListAPIView(APIView):
+    permission_classes = [IsManager]
 
-            status_code = 201 if result['success'] else 400
-            return JsonResponse(result, status=status_code)
+    def get(self, request):
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id_employee, empl_surname, empl_name, empl_patronymic, 
+                       empl_role, salary, date_of_birth, date_of_start, 
+                       phone_number, city, street, zip_code 
+                FROM Employee""")
+            employees = dictfetchall(cursor)
+        return Response(employees, status=status.HTTP_200_OK)
 
-        except Exception as e:
-            return JsonResponse({"success": False, "error": str(e)}, status=500)
+    def post(self, request):
+        data = request.data
+        hashed_password = make_password(data.get('password'))
 
-    elif request.method == "GET":
-        # sql запит сюди :)
-        pass
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("""
+                    INSERT INTO Employee (
+                        id_employee, password, empl_surname, empl_name, empl_patronymic,
+                        empl_role, salary, date_of_birth, date_of_start, phone_number,
+                        city, street, zip_code, is_active, is_staff, is_superuser
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, True, False, False)
+                """, [
+                    data.get('id_employee'), hashed_password, data.get('empl_surname'),
+                    data.get('empl_name'), data.get('empl_patronymic'), data.get('empl_role'),
+                    data.get('salary'), data.get('date_of_birth'), data.get('date_of_start'),
+                    data.get('phone_number'), data.get('city'), data.get('street'), data.get('zip_code')
+                ])
+                return Response({"message": "Працівника успішно створено!"}, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+class EmployeeDetailAPIView(APIView):
+    permission_classes = [IsManager | IsCashier]
+    def get(self, request, id_employee):
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id_employee, empl_surname, empl_name, empl_patronymic, 
+                       empl_role, salary, date_of_birth, date_of_start, 
+                       phone_number, city, street, zip_code 
+                FROM Employee WHERE id_employee = %s
+            """, [id_employee])
+            row = dictfetchall(cursor)
+
+            if not row:
+                return Response({"detail": "Працівника не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(row[0], status=status.HTTP_200_OK)
+
+    def put(self, request, id_employee):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Редагування доступне лише менеджерам."}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("""
+                    UPDATE Employee SET 
+                        empl_surname = %s, empl_name = %s, empl_patronymic = %s,
+                        empl_role = %s, salary = %s, phone_number = %s,
+                        city = %s, street = %s, zip_code = %s
+                    WHERE id_employee = %s
+                """, [
+                    data.get('empl_surname'), data.get('empl_name'), data.get('empl_patronymic'),
+                    data.get('empl_role'), data.get('salary'), data.get('phone_number'),
+                    data.get('city'), data.get('street'), data.get('zip_code'), id_employee
+                ])
+                return Response({"message": "Дані працівника оновлено!"}, status=status.HTTP_200_OK)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, id_employee):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Редагування доступне лише менеджерам."}, status=status.HTTP_403_FORBIDDEN)
+
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM Employee WHERE id_employee = %s", [id_employee])
+
+            return Response({"message": "Працівника видалено з бази даних."}, status=status.HTTP_204_NO_CONTENT)
