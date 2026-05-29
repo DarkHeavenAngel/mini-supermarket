@@ -1,13 +1,20 @@
 import json
 from decimal import Decimal
-from django.db import connection, transaction
+
+from django.contrib.auth.hashers import make_password
+from django.db import connection, transaction, IntegrityError
 from datetime import datetime, date
 
 from django.http import JsonResponse
 from django.utils import timezone
 import re
-from rest_framework import viewsets
+from rest_framework import viewsets, status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
 from .models import Employee, Product, Check, Category, StoreProduct, CustomerCard, Sale
+from .permissions import IsManager, IsCashier
 from .serializers import (
     EmployeeSerializer, ProductSerializer, CheckSerializer,
     CategorySerializer, StoreProductSerializer, CustomerCardSerializer, SaleSerializer
@@ -167,32 +174,256 @@ def add_new_employee(id_employee, empl_surname, empl_name, empl_role, salary, da
         except Exception as e:
             return {"success": False, "error": f"Помилка бази даних: {str(e)}"}
 
-@csrf_exempt # тимчасово використаю це для виклику csrf без токена
-def api_employees(request):
-    if request.method == "POST":
-        try:
-            data = json.loads(request.body)
+#Functiobn to show profile
+class EmployeeProfileAPIView(APIView):
+    permission_classes = [IsAuthenticated]
 
-            result = add_new_employee(
-                id_employee=data.get('id_employee'),
-                empl_surname=data.get('empl_surname'),
-                empl_name=data.get('empl_name'),
-                empl_role=data.get('empl_role'),
-                salary=Decimal('salary'),
-                date_of_birth=data.get('date_of_birth'),
-                date_of_start=data.get('date_of_start'),
-                phone_number=data.get('phone_number'),
-                city=data.get('city'),
-                street=data.get('street'),
-                zip_code=data.get('zip_code')
-            )
+    def get(self, request):
+        my_id = request.user.id_employee
 
-            status_code = 201 if result['success'] else 400
-            return JsonResponse(result, status=status_code)
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id_employee, empl_surname, empl_name, empl_patronymic, 
+                       empl_role, salary, date_of_birth, date_of_start, 
+                       phone_number, city, street, zip_code 
+                FROM Employee WHERE id_employee = %s
+            """, [my_id])
+            row = dictfetchall(cursor)
 
-        except Exception as e:
-            return JsonResponse({"success": False, "error": str(e)}, status=500)
+        if not row:
+            return Response({"detail": "Профіль не знайдено"}, status=status.HTTP_404_NOT_FOUND)
 
-    elif request.method == "GET":
-        # sql запит сюди :)
-        pass
+        return Response(row[0], status=status.HTTP_200_OK)
+
+#Допоміжна функція для перетворення результатів SQL-запиту в список словників (JSON)
+def dictfetchall(cursor):
+    columns = [col[0] for col in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+#CRUD for employees
+class EmployeeListAPIView(APIView):
+    permission_classes = [IsManager]
+
+    def get(self, request):
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id_employee, empl_surname, empl_name, empl_patronymic, 
+                       empl_role, salary, date_of_birth, date_of_start, 
+                       phone_number, city, street, zip_code 
+                FROM Employee""")
+            employees = dictfetchall(cursor)
+        return Response(employees, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        data = request.data
+        hashed_password = make_password(data.get('password'))
+
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("""
+                    INSERT INTO Employee (
+                        id_employee, password, empl_surname, empl_name, empl_patronymic,
+                        empl_role, salary, date_of_birth, date_of_start, phone_number,
+                        city, street, zip_code, is_active, is_staff, is_superuser
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, True, False, False)
+                """, [
+                    data.get('id_employee'), hashed_password, data.get('empl_surname'),
+                    data.get('empl_name'), data.get('empl_patronymic'), data.get('empl_role'),
+                    data.get('salary'), data.get('date_of_birth'), data.get('date_of_start'),
+                    data.get('phone_number'), data.get('city'), data.get('street'), data.get('zip_code')
+                ])
+                return Response({"message": "Працівника успішно створено"}, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+class EmployeeDetailAPIView(APIView):
+    permission_classes = [IsManager | IsCashier]
+    def get(self, request, id_employee):
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id_employee, empl_surname, empl_name, empl_patronymic, 
+                       empl_role, salary, date_of_birth, date_of_start, 
+                       phone_number, city, street, zip_code 
+                FROM Employee WHERE id_employee = %s
+            """, [id_employee])
+            row = dictfetchall(cursor)
+
+            if not row:
+                return Response({"detail": "Працівника не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(row[0], status=status.HTTP_200_OK)
+
+    def put(self, request, id_employee):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("""
+                    UPDATE Employee SET 
+                        empl_surname = %s, empl_name = %s, empl_patronymic = %s,
+                        empl_role = %s, salary = %s, phone_number = %s,
+                        city = %s, street = %s, zip_code = %s
+                    WHERE id_employee = %s
+                """, [
+                    data.get('empl_surname'), data.get('empl_name'), data.get('empl_patronymic'),
+                    data.get('empl_role'), data.get('salary'), data.get('phone_number'),
+                    data.get('city'), data.get('street'), data.get('zip_code'), id_employee
+                ])
+                return Response({"message": "Дані працівника оновлено"}, status=status.HTTP_200_OK)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, id_employee):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM Employee WHERE id_employee = %s", [id_employee])
+
+            return Response({"message": "Працівника успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+
+#CRUD for categories
+class CategoryListAPIView(APIView):
+    permission_classes = [IsManager | IsCashier]
+
+    def get(self, request):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT category_number, category_name FROM Category")
+            categories = dictfetchall(cursor)
+        return Response(categories, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        if request.user.empl_role != "Менеджер":
+            return Response({"detail": "Створення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("""
+                    INSERT INTO Category (category_number, category_name) 
+                    VALUES (%s, %s)
+                """, [data.get('category_number'), data.get('category_name')])
+
+                return Response({"message": "Категорію успішно створено"}, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+class CategoryDetailAPIView(APIView):
+    permission_classes = [IsManager | IsCashier]
+
+    def get(self, request, category_number):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT category_number, category_name FROM Category WHERE category_number = %s", [category_number])
+            row = dictfetchall(cursor)
+
+            if not row:
+                return Response({"detail": "Категорію не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(row[0], status=status.HTTP_200_OK)
+
+    def put(self, request, category_number):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("""
+                    UPDATE Category 
+                    SET category_name = %s 
+                    WHERE category_number = %s
+                """, [data.get('category_name'), category_number])
+
+                return Response({"message": "Категорію оновлено"}, status=status.HTTP_200_OK)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, category_number):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Видалення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM Category WHERE category_number = %s", [category_number])
+
+            return Response({"message": "Категорію успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+
+#CRUD for products
+class ProductListAPIView(APIView):
+    permission_classes = [IsManager | IsCashier]
+
+    def get(self, request):
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT p.id_product, p.category_number, c.category_name, 
+                       p.product_name, p.characteristics, p.manufacturer
+                FROM Product p
+                LEFT JOIN Category c ON p.category_number = c.category_number
+            """)
+
+            products = dictfetchall(cursor)
+        return Response(products, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        if request.user.empl_role != "Менеджер":
+            return Response({"detail": "Створення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("""
+                    INSERT INTO Product (id_product, category_number, product_name, characteristics, manufacturer)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, [
+                    data.get('id_product'), data.get('category_number'),
+                    data.get('product_name'), data.get('characteristics'), data.get('manufacturer')
+                ])
+
+                return Response({"message": "Товар успішно створено"}, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+class ProductDetailAPIView(APIView):
+    permission_classes = [IsManager | IsCashier]
+
+    def get(self, request, id_product):
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT p.id_product, p.category_number, c.category_name, 
+                       p.product_name, p.characteristics, p.manufacturer
+                FROM Product p
+                LEFT JOIN Category c ON p.category_number = c.category_number
+                WHERE p.id_product = %s
+            """, [id_product])
+            row = dictfetchall(cursor)
+
+        if not row:
+            return Response({"detail": "Товар не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(row[0], status=status.HTTP_200_OK)
+
+    def put(self, request, id_product):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("""
+                    UPDATE Product 
+                    SET category_number = %s, product_name = %s, characteristics = %s, manufacturer = %s 
+                    WHERE id_product = %s
+                """, [
+                    data.get('category_number'), data.get('product_name'),
+                    data.get('characteristics'), data.get('manufacturer'), id_product
+                ])
+                return Response({"message": "Товар оновлено"}, status=status.HTTP_200_OK)
+            except IntegrityError:
+                return Response({"error": "Вказаної категорії не існує"}, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, id_product):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Видалення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM Product WHERE id_product = %s", [id_product])
+
+        return Response({"message": "Товар успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
