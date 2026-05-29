@@ -1,13 +1,13 @@
 import json
+import re
 from decimal import Decimal
+from datetime import datetime, date
 
 from django.contrib.auth.hashers import make_password
 from django.db import connection, transaction, IntegrityError
-from datetime import datetime, date
 
 from django.http import JsonResponse
 from django.utils import timezone
-import re
 from rest_framework import viewsets, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -20,7 +20,6 @@ from .serializers import (
     CategorySerializer, StoreProductSerializer, CustomerCardSerializer, SaleSerializer
 )
 
-from django.views.decorators.csrf import csrf_exempt
 
 
 def store_product(upc, id_product, selling_price, products_number, is_promotional=False, upc_prom=None):
