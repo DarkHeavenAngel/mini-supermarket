@@ -1,26 +1,19 @@
 import json
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, date
 
 from django.contrib.auth.hashers import make_password
 from django.db import connection, transaction, IntegrityError
-
 from django.http import JsonResponse
 from django.utils import timezone
-from rest_framework import viewsets, status
+
+from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Employee, Product, Check, Category, StoreProduct, CustomerCard, Sale
 from .permissions import IsManager, IsCashier
-from .serializers import (
-    EmployeeSerializer, ProductSerializer, CheckSerializer,
-    CategorySerializer, StoreProductSerializer, CustomerCardSerializer, SaleSerializer
-)
-
-
 
 def store_product(upc, id_product, selling_price, products_number, is_promotional=False, upc_prom=None):
     with connection.cursor() as cursor:
@@ -119,60 +112,6 @@ def create_new_check(check_number, id_employee, card_number, items_list):
 
     return {"success": True, "message": 'Чек успішно створено'}
 
-def add_new_employee(id_employee, empl_surname, empl_name, empl_role, salary, date_of_birth, date_of_start, phone_number, city, street, zip_code):
-
-    # валідація телефону
-    if not re.match(r'^\+380\d{9}$', phone_number):
-        return {
-            "success": False,
-            "error": "Номер телефону повинен починатися з '+380' та містити всього 13 символів"
-        }
-
-    # валідація віку
-    try:
-        if isinstance(date_of_birth, str):
-            born_date = datetime.strptime(date_of_birth, "%Y-%m-%d").date()
-        else:
-            born_date = date_of_birth
-    except (ValueError, TypeError):
-        return {
-            "success": False,
-            "error": "Некоректний формат дати народження. Використовуйте РРРР-ММ-ДД"
-        }
-
-    today = date.today()
-    age = today.year - born_date.year - ((today.month, today.day) < (born_date.month, born_date.day))
-
-    if age < 18:
-        return {
-            "success": False,
-            "error": "Вік працівника не може бути меншим за 18 років"
-        }
-
-    # валідація зарплати
-    if Decimal(str(salary)) < 0:
-        return {
-            "success": False,
-            "error": "Заробітня плата не може бути від'ємною"
-        }
-
-    with connection.cursor() as cursor:
-        try:
-            cursor.execute("""
-                           INSERT INTO Employee 
-                           (id_employee, empl_surname, empl_name, empl_role, salary,
-                           date_of_birth, date_of_start, phone_number, city, street, zip_code, password, is_active, is_staff, is_superuser)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                           """, [
-                id_employee, empl_surname, empl_name, empl_role, salary,
-                born_date, date_of_start, phone_number, city, street, zip_code,
-                '', True, False, False
-            ])
-            return {"success": True, "message": "Працівника успішно додано"}
-
-        except Exception as e:
-            return {"success": False, "error": f"Помилка бази даних: {str(e)}"}
-
 #Functiobn to show profile
 class EmployeeProfileAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -199,6 +138,76 @@ def dictfetchall(cursor):
     columns = [col[0] for col in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+# перероблена глобальна валідація робітників для sql запитів
+def validate_employee_data(data, check_id=False):
+    id_employee = data.get('id_employee')
+    phone_number = data.get('phone_number')
+    date_of_birth = data.get('date_of_birth')
+    salary = data.get('salary')
+
+    # валідація ID при стоверні
+    if check_id and not id_employee:
+        return "Індентифікаційний номер сповробітника є обов'язковим"
+
+    # валідація телефону (не більше 13 символів + формат +380)
+    if not phone_number or not re.match(r'^\+380\d{9}$', str(phone_number)):
+        return "Номер телефону повинен починатися з '+380' та містити всього 13 символів"
+
+    # валідація зарплати (не може бути від'ємною)
+    if salary is not None:
+        try:
+            if Decimal(str(salary)) < 0:
+                return "Заробітня плата не може бути від'ємною"
+        except (ValueError, TypeError, InvalidOperation):
+            return "Некоректне значення заробітньої плати"
+
+    # валідація віку (не менше 18)
+    if not date_of_birth:
+        return "Дата народження є обов'язковою"
+    try:
+        if isinstance(date_of_birth, str):
+            born_date = datetime.strptime(date_of_birth, "%Y-%m-%d").date()
+        else:
+            born_date = date_of_birth
+    except (ValueError, TypeError):
+        return "Некоректний формат дати народження. Використовуйте РРРР-ММ-ДД"
+
+    today = date.today()
+    age = today.year - born_date.year - ((today.month, today.day) < (born_date.month, born_date.day))
+
+    if age < 18:
+        return "Вік працівника не може бути меншим за 18 років"
+
+    return None
+
+# глобальна валідація для товару в магазині
+def validate_store_product_data(data):
+    # валідація на невід'ємну ціну та кількість
+    try:
+        price = Decimal(str(data.get('selling_price', '0')))
+        if price < 0:
+            return "Ціна продажу не може бути від'ємною"
+    except (ValueError, TypeError):
+        return "Некоректне значення кількості одиниць"
+
+    return None
+
+# глобальна валідація чеку
+def validate_check_data(item_list):
+    # кількість товару > 0
+    if not item_list or not isinstance(item_list, list) or len(item_list) == 0:
+        return "Чек повинен містити хоча б один товар"
+
+    for item in item_list:
+        try:
+            qty = int(item.get('qty', 0))
+            if qty < 0:
+                return f"Кількість купленого товару (UPC: {item.get('upc')}) повина бути більшою за 0"
+        except (ValueError, TypeError):
+            return "Некоректне значення кількості товару в чеку"
+
+        return None
+
 #CRUD for employees
 class EmployeeListAPIView(APIView):
     permission_classes = [IsManager]
@@ -209,12 +218,20 @@ class EmployeeListAPIView(APIView):
                 SELECT id_employee, empl_surname, empl_name, empl_patronymic, 
                        empl_role, salary, date_of_birth, date_of_start, 
                        phone_number, city, street, zip_code 
-                FROM Employee""")
+                FROM Employee
+                ORDER BY empl_surname ASC
+            """) # + сортування за прізвищем з вимог
             employees = dictfetchall(cursor)
         return Response(employees, status=status.HTTP_200_OK)
 
     def post(self, request):
         data = request.data
+
+        # виклик валідації працівника
+        validation_error = validate_employee_data(data, check_id=True)
+        if validation_error:
+            return Response({"error": validation_error}, status=status.HTTP_400_BAD_REQUEST)
+
         hashed_password = make_password(data.get('password'))
 
         with connection.cursor() as cursor:
@@ -233,11 +250,18 @@ class EmployeeListAPIView(APIView):
                 ])
                 return Response({"message": "Працівника успішно створено"}, status=status.HTTP_201_CREATED)
             except Exception as e:
+                # перехоплення дубльованого ключа
+                if "UNIQUE" in str(e) or "primary key" in str(e).lower():
+                    return Response({"error": "Працівник з таким ID вже існує в системі"}, status=status.HTTP_400_BAD_REQUEST)
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 class EmployeeDetailAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
+
     def get(self, request, id_employee):
+        if request.user.empl_role != 'Менеджер' and request.user.id_employee != id_employee:
+            return Response({"detail": "Ви не маєте доступу до даних інших працівників"}, status=status.HTTP_403_FORBIDDEN)
+
         with connection.cursor() as cursor:
             cursor.execute("""
                 SELECT id_employee, empl_surname, empl_name, empl_patronymic, 
@@ -256,6 +280,12 @@ class EmployeeDetailAPIView(APIView):
             return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data
+
+        # виклик валідації працівника
+        validation_error = validate_employee_data(data, check_id=True)
+        if validation_error:
+            return Response({"error": validation_error}, status=status.HTTP_400_BAD_REQUEST)
+
         with connection.cursor() as cursor:
             try:
                 cursor.execute("""
@@ -269,17 +299,22 @@ class EmployeeDetailAPIView(APIView):
                     data.get('empl_role'), data.get('salary'), data.get('phone_number'),
                     data.get('city'), data.get('street'), data.get('zip_code'), id_employee
                 ])
+
+                if cursor.rowcount == 0:
+                    return Response({"detail": "Працівника не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+
                 return Response({"message": "Дані працівника оновлено"}, status=status.HTTP_200_OK)
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, id_employee):
         if request.user.empl_role != 'Менеджер':
-            return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Видалення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
 
         with connection.cursor() as cursor:
             cursor.execute("DELETE FROM Employee WHERE id_employee = %s", [id_employee])
-
+            if cursor.rowcount == 0:
+                return Response({"detail": "Працівника не знайдено"}, status=status.HTTP_404_NOT_FOUND)
             return Response({"message": "Працівника успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
 
 #CRUD for categories
@@ -288,7 +323,7 @@ class CategoryListAPIView(APIView):
 
     def get(self, request):
         with connection.cursor() as cursor:
-            cursor.execute("SELECT category_number, category_name FROM Category")
+            cursor.execute("SELECT category_number, category_name FROM Category ORDER BY category_name ASC") # + фільтрація за назвою
             categories = dictfetchall(cursor)
         return Response(categories, status=status.HTTP_200_OK)
 
@@ -357,7 +392,8 @@ class ProductListAPIView(APIView):
                        p.product_name, p.characteristics, p.manufacturer
                 FROM Product p
                 LEFT JOIN Category c ON p.category_number = c.category_number
-            """)
+                ORDER BY p.product_name ASC 
+            """) # + фільтрація за ім'ям
 
             products = dictfetchall(cursor)
         return Response(products, status=status.HTTP_200_OK)
