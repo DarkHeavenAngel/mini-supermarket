@@ -1,17 +1,24 @@
 import json
 import re
+from ast import Store
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, date
+from tkinter.tix import CheckList
 
+import current_time
+import cursor
 from django.contrib.auth.hashers import make_password
 from django.db import connection, transaction, IntegrityError
-from django.http import JsonResponse
+from django.http import JsonResponse, Http404
 from django.utils import timezone
 
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from .models import CustomerCard, Check, StoreProduct
+from .serializers import CustomerCardSerializer, CheckSerializer, StoreProductSerializer
 
 from .permissions import IsManager, IsCashier
 
@@ -462,3 +469,218 @@ class ProductDetailAPIView(APIView):
             cursor.execute("DELETE FROM Product WHERE id_product = %s", [id_product])
 
         return Response({"message": "Товар успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+
+#CRUD for Customer Cards
+class CustomerCardListAPIView(APIView):
+    permition_classes = [IsAuthenticated]
+    def get(self, request):
+        search = request.query_params.get('search', ' ')
+        percent = request.query_params.get('percent')
+        sort = request.query_params.get('sort')
+        queryset = CustomerCard.objects.all()
+        if search:
+            queryset = queryset.filter(cust_name__icontains=search)
+        if percent:
+            queryset = queryset.filter(percent=percent)
+        if sort:
+            queryset = queryset.order_by(sort)
+
+        serializer = CustomerCardSerializer(queryset, many=True)
+        return Response(serializer.data)
+    def post(self, request):
+        permition_classes = [IsManager]
+        serializer = CustomerCardSerializer(data=request.data)
+        if serializer.is_valid():
+            try:
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class CustomerCardDetailAPIView(APIView):
+    def get_object(self, pk):
+        try:
+            return CustomerCard.objects.get(pk=pk)
+        except CustomerCard.DoesNotExist:
+            raise Http404
+
+    def get(self, request, pk):
+        card = self.get_object(pk)
+        serializer = CustomerCardSerializer(card)
+        return Response(serializer.data)
+
+    def put(self, request, pk):
+        card = self.get_object(pk)
+        serializer = CustomerCardSerializer(card, data=request.data, partial=True)
+        if serializer.is_valid():
+            try:
+                serializer.save()
+                return Response(serializer.data)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        card = self.get_object(pk)
+        try:
+            card.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+#CRUD for checks
+class CheckListAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        cashier_id = request.query_params.get('cashier_id')
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        queryset = CheckList.objects.filter(id_cashier=cashier_id)
+        if start_date:
+            queryset = queryset.filter(id_employee=cashier_id)
+        if start_date and end_date:
+            queryset = queryset.filter(print_date__range=(start_date, end_date))
+
+        serializer = CheckSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        if request.user.empl_role != "Касир":
+            return Response({"detail": "Створення чеків доступне лише касирам"}, status=status.HTTP_403_FORBIDDEN)
+
+        check_data = request.data
+        items_list = check_data.pop('items')
+        with connection.cursor() as cursor:
+            try:
+                check_number = check_data.get('check_number')
+                id_employee = check_data.get('id_employee')
+                card_number = check_data.get('card_number')
+                current_time = timezone.now()
+                subtotal = 0
+                for item in items_list:
+                    cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [item['upc']])
+                    row = cursor.fetchone()
+                    if not row:
+                        return Response({"error": f"Товар з UPC {item['upc']} не знайдено"},
+                                        status=status.HTTP_400_BAD_REQUEST)
+                    price = row[0]
+                    subtotal += price * item['quantity']
+
+                vat_amount = subtotal * Decimal('0.2')
+                final_sum = subtotal + vat_amount
+                cursor.execute("""
+                               INSERT INTO StoreCheck (check_number, id_employee, card_number, print_date, sum_total, vat)
+                               VALUES (%s, %s, %s, %s, %s, %s)
+                               """, [check_number, id_employee, card_number, current_time, final_sum, vat_amount])
+
+                for item in items_list:
+                    cursor.execute("""
+                                   INSERT INTO Sale (upc, check_number, product_number, selling_price)
+                                   VALUES (%s, %s, %s, %s)
+                                   """, [item['upc'], check_number, item.get('product_number'), item['selling_price']])
+
+                return Response({"message": "Чек успішно створено"}, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class CheckDetailAPIView(APIView):
+    def get_object(self, pk):
+        try:
+            return Check.objects.get(pk=pk)
+        except Check.DoesNotExist:
+            raise Http404
+
+    def get(self, request, pk):
+        check = self.get_object(pk)
+        serializer = CheckSerializer(check)
+        return Response(serializer.data)
+
+    def put(self, request, pk):
+        if request.user.empl_role != "Менеджер":
+            return Response({"detail": "Оновлення чеків доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        check = self.get_object(pk)
+        serializer = CheckSerializer(check, data=request.data)
+        if serializer.is_valid():
+            try:
+                serializer.save()
+                return Response(serializer.data)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Видалення чеків доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("DELETE FROM Check WHERE check_number = %s", [pk])
+                return Response({"message": "Чек успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+#CRUD for store products
+class StoreProductListAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        queryset = StoreProduct.objects.all()
+        serializer = StoreProductSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        if request.user.empl_role != "Менеджер":
+            return Response({"detail": "Створення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("""
+                               INSERT INTO Product (id_product, category_number, product_name, characteristics,
+                                                    manufacturer)
+                               VALUES (%s, %s, %s, %s, %s)
+                               """, [
+                                   data.get('id_product'), data.get('category_number'),
+                                   data.get('product_name'), data.get('characteristics'), data.get('manufacturer')
+                               ])
+                return Response({"message": "Товар успішно створено"}, status=status.HTTP_201_CREATED)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class StoreProductDetailsAPIView(APIView):
+    def get_object(self, pk):
+        try:
+            return Store.objects.get(pk=pk)
+        except StoreProduct.DoesNotExist:
+            raise Http404
+
+    def get(self, request, pk):
+        product = self.get_object(pk)
+        serializer = StoreProductSerializer(product)
+        return Response(serializer.data)
+
+    def put(self, request, pk):
+        product = self.get_object(pk)
+        serializer = StoreProductSerializer(product, data=request.data)
+        if serializer.is_valid():
+            try:
+                serializer.save()
+                return Response(serializer.data)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Видалення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("DELETE FROM Product WHERE id_product = %s", [pk])
+                return Response({"message": "Товар успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
