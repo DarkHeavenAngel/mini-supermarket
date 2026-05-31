@@ -462,3 +462,28 @@ class ProductDetailAPIView(APIView):
             cursor.execute("DELETE FROM Product WHERE id_product = %s", [id_product])
 
         return Response({"message": "Товар успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+
+# Інформація для звіту на головній сторінці
+class DashboardStatsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        with connection.cursor() as cursor:
+            # Чеки
+            cursor.execute("SELECT COUNT(*) FROM StoreCheck WHERE DATE(print_date) = CURRENT_DATE;")
+            checks_today = cursor.fetchone()[0]
+
+            # Акційні товари
+            cursor.execute("SELECT COUNT(*) FROM StoreProduct WHERE promotional_product = TRUE;")
+            promo_items = cursor.fetchone()[0]
+
+            # Кількість клієнтських карткок
+            cursor.execute("SELECT COUNT(*) FROM CustomerCard;")
+            total_cards = cursor.fetchone()[0]
+
+        return Response({
+            "checks_today": checks_today,
+            "promo_items": promo_items,
+            "total_cards": total_cards
+        }, status=status.HTTP_200_OK)
+
