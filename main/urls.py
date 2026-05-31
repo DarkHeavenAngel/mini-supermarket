@@ -12,3 +12,4 @@ urlpatterns = [
     path('products/<int:id_product>/', ProductDetailAPIView.as_view(), name='product-detail'),
     path('profile/', EmployeeProfileAPIView.as_view(), name='employee-profile'),
 ]
+
