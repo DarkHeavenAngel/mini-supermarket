@@ -603,13 +603,18 @@ class CustomerCardListAPIView(APIView):
 
         with connection.cursor() as cursor:
             try:
+                # генерація ID
+                cursor.execute("SELECT MAX(CAST(card_number AS NUMERIC)) FROM CustomerCard")
+                max_id = cursor.fetchone()[0]
+                next_id = str((max_id or 0) + 1).zfill(13)
+
                 cursor.execute("""
                     INSERT INTO CustomerCard (
                         card_number, cust_surname, cust_name, cust_patronymic,
                         phone_number, city, street, zip_code, percent
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, [
-                    data.get('card_number'), data.get('cust_surname'), data.get('cust_name'),
+                    next_id, data.get('cust_surname'), data.get('cust_name'),
                     data.get('cust_patronymic'), data.get('phone_number'), data.get('city'),
                     data.get('street'), data.get('zip_code'), data.get('percent')
                 ])
