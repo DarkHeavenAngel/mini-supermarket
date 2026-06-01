@@ -1,11 +1,9 @@
 import re
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, date
-from re import search
 
 from django.contrib.auth.hashers import make_password
 from django.db import connection, transaction, IntegrityError
-from django.http import JsonResponse, Http404
 from django.utils import timezone
 
 from rest_framework import status
@@ -556,39 +554,68 @@ class DashboardStatsAPIView(APIView):
             "total_cards": total_cards
         }, status=status.HTTP_200_OK)
 
+# Валідація клієнтів
+def validate_customer_data(data):
+    # Валідація телефону
+    phone = str(data.get('phone_number', ''))
+    if not re.match(r'^\+380\d{9}$', phone):
+        return "Номер телефону повинен починатися з '+380' та мати 13 символів"
+
+    try:
+        percent = Decimal(str(data.get('percent', 0)))
+        if percent < 0 or percent > 100:
+            return "Відсоток знижки має бути від 0 до 100"
+    except (ValueError, TypeError, InvalidOperation):
+        return "Некоректне значення відсотка"
+
+    return None
+
 #CRUD for Customer Cards
 class CustomerCardListAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
 
     def get(self, request):
-        search = request.query_params.get('search', '')
-        with connection.cursor() as cursor:
-            sql = "SELECT * FROM CustomerCard WHERE 1=1"
-            params = []
-            if search:
-                # Пошук за прізвищем або ім'ям
-                sql += " AND (cust_surname ILIKE %s OR cust_name ILIKE %s)"
-                params.extend([f"%{search}%", f"%{search}%"])
+        search = request.GET.get('search', '').strip()
 
-            cursor.execute(sql, params)
+        query = """
+            SELECT card_number, cust_surname, cust_name, cust_patronymic,
+                   phone_number, city, street, zip_code, percent
+            FROM CustomerCard
+            WHERE 1 = 1
+        """
+        params = []
+        if search:
+            query += " AND LOWER(cust_surname) LIKE LOWER(%s)"
+            params.append(f"{search}%")
+
+        query += " ORDER BY cust_surname ASC"
+
+        with connection.cursor() as cursor:
+            cursor.execute(query, params)
             return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
 
     def post(self, request):
         data = request.data
+
+        error = validate_customer_data(data)
+        if error:
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+
         with connection.cursor() as cursor:
             try:
                 cursor.execute("""
-                    INSERT INTO CustomerCard (card_number, cust_surname, cust_name, cust_patronymic, phone_number, city, street, zip_code, percent)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO CustomerCard (
+                        card_number, cust_surname, cust_name, cust_patronymic,
+                        phone_number, city, street, zip_code, percent
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, [
-                            data.get('card_number'), data.get('cust_surname'), data.get('cust_name'),data.get('cust_patronymic'),
-                            data.get('phone_number'), data.get('city'), data.get('street'), data.get('zip_code'), data.get('percent')
+                    data.get('card_number'), data.get('cust_surname'), data.get('cust_name'),
+                    data.get('cust_patronymic'), data.get('phone_number'), data.get('city'),
+                    data.get('street'), data.get('zip_code'), data.get('percent')
                 ])
-                return Response({"message": "Карту клієнта створено"}, status=status.HTTP_201_CREATED)
+                return Response({"message": "Карту успішно створено"}, status=status.HTTP_201_CREATED)
             except IntegrityError:
                 return Response({"error": "Картка з таким номером вже існує"}, status=status.HTTP_400_BAD_REQUEST)
-            except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 class CustomerCardDetailAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
@@ -602,10 +629,12 @@ class CustomerCardDetailAPIView(APIView):
         return Response(row[0], status=status.HTTP_200_OK)
 
     def put(self, request, card_number):
-        if request.user.empl_role != 'Менеджер':
-            return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
-
         data = request.data
+
+        error = validate_customer_data(data)
+        if error:
+            return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+
         with connection.cursor() as cursor:
             try:
                 cursor.execute("""
@@ -618,6 +647,10 @@ class CustomerCardDetailAPIView(APIView):
                         data.get('phone_number'), data.get('city'), data.get('street'),
                         data.get('zip_code'), data.get('percent'), card_number
                     ])
+
+                if cursor.rowcount == 0:
+                    return Response({"detail": "Карту з таким номером не знайдено."}, status=status.HTTP_404_NOT_FOUND)
+
                 return Response({"message": "Карту успішно оновлено"}, status=status.HTTP_200_OK)
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
