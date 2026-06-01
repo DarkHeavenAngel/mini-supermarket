@@ -3,7 +3,6 @@ import re
 from ast import Store
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, date
-from tkinter.tix import CheckList
 
 import current_time
 import cursor
@@ -16,9 +15,6 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-
-from .models import CustomerCard, Check, StoreProduct
-from .serializers import CustomerCardSerializer, CheckSerializer, StoreProductSerializer
 
 from .permissions import IsManager, IsCashier
 
@@ -472,62 +468,103 @@ class ProductDetailAPIView(APIView):
 
 #CRUD for Customer Cards
 class CustomerCardListAPIView(APIView):
-    permition_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated]
     def get(self, request):
-        search = request.query_params.get('search', ' ')
+        search = request.query_params.get('search', '')
         percent = request.query_params.get('percent')
         sort = request.query_params.get('sort')
-        queryset = CustomerCard.objects.all()
-        if search:
-            queryset = queryset.filter(cust_name__icontains=search)
-        if percent:
-            queryset = queryset.filter(percent=percent)
-        if sort:
-            queryset = queryset.order_by(sort)
 
-        serializer = CustomerCardSerializer(queryset, many=True)
-        return Response(serializer.data)
-    def post(self, request):
-        permition_classes = [IsManager]
-        serializer = CustomerCardSerializer(data=request.data)
-        if serializer.is_valid():
+        with connection.cursor() as cursor:
             try:
-                serializer.save()
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
+                sql = ("SELECT id_card, cust_name, percent "
+                       "FROM CustomerCard "
+                       "WHERE 1=1")
+                params = []
+                if search:
+                    sql += " AND cust_name LIKE %s"
+                    params.append(f"%{search}%")
+
+                # Тут логіка серіалізації замінюється на повернення JSON
+                return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
             except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": f"Помилка при отриманні карток клієнтів: {str(e)}"},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def post(self, request):
+        permission_classes = [IsManager]
+        data = request.data
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(""" INSERT INTO CustomerCard (card_number, cust_surname, cust_name, cust_patronymic,
+                  phone_number, city, street, zip_code, percent)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                               [data.get('id_card'), data.get('cust_surname'), data.get('cust_name'), data.get('cust_patronymic'), data.get('phone_number'), data.get('city'),
+                                data.get('street'), data.get('zip_code'), data.get('percent')])
+
+                return Response({"message": "Карта клієнта успішно створена"}, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({"error": f"Помилка при створенні картки клієнта: {str(e)}"},
+                            status=status.HTTP_400_BAD_REQUEST)
 
 class CustomerCardDetailAPIView(APIView):
     def get_object(self, pk):
-        try:
-            return CustomerCard.objects.get(pk=pk)
-        except CustomerCard.DoesNotExist:
-            raise Http404
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("SELECT * FROM CustomerCard "
+                               "WHERE id_card = %s", [pk])
+                row = cursor.fetchone()
+                if not row:
+                    return None # Не знайдено
+                # Повертаємо кортеж/рядок, який потім клієнт трансформує в JSON
+                return dictfetchall(cursor)[0]
+            except Exception as e:
+                 raise Http404()
 
     def get(self, request, pk):
-        card = self.get_object(pk)
-        serializer = CustomerCardSerializer(card)
-        return Response(serializer.data)
+        card_data = self.get_object_sql(pk)
+        if card_data is None:
+            return Response({"detail": "Карту клієнта не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(card_data, status=status.HTTP_200_OK)
 
     def put(self, request, pk):
-        card = self.get_object(pk)
-        serializer = CustomerCardSerializer(card, data=request.data, partial=True)
-        if serializer.is_valid():
+        data = request.data
+        with connection.cursor() as cursor:
             try:
-                serializer.save()
-                return Response(serializer.data)
+                cursor.execute("""
+                               UPDATE CustomerCard
+                               SET cust_surname = %s,
+                                   cust_name = %s,
+                                   cust_patronymic = %s,
+                                   phone_number = %s,
+                                   city = %s,
+                                   street = %s,
+                                   zip_code = %s,
+                                   percent = %s
+                                   WHERE id_card = %s
+                               """, [data.get('cust_surname'), data.get('cust_name'), data.get('cust_patronymic'), data.get('phone_number'),
+                                     data.get('city'), data.get('street'), data.get('zip_code'), data.get('percent'), pk])
+
+                if cursor.rowcount == 0:
+                    return Response({"detail": "Карта не знайдена для оновлення."}, status=status.HTTP_404_NOT_FOUND)
+
+                return Response({"message": "Карта успішно оновлена"}, status=status.HTTP_200_OK)
             except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": f"Помилка при оновленні картки клієнта: {str(e)}"},
+                                status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, pk):
-        card = self.get_object(pk)
-        try:
-            card.delete()
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("DELETE FROM CustomerCard "
+                               "WHERE id_card = %s", [pk])
+                if cursor.rowcount == 0:
+                    return Response({"detail": "Карта не знайдена для видалення."}, status=status.HTTP_404_NOT_FOUND)
+
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            except Exception as e:
+                return Response({"error": f"Помилка при видаленні картки клієнта: {str(e)}"},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 #CRUD for checks
 class CheckListAPIView(APIView):
@@ -537,16 +574,25 @@ class CheckListAPIView(APIView):
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date')
 
-        queryset = CheckList.objects.filter(id_cashier=cashier_id)
-        if start_date:
-            queryset = queryset.filter(id_employee=cashier_id)
-        if start_date and end_date:
-            queryset = queryset.filter(print_date__range=(start_date, end_date))
+        with connection.cursor() as cursor:
+            try:
+                sql = "SELECT * FROM StoreCheck WHERE 1=1"
+                params = []
+                if cashier_id:
+                    sql += " AND id_employee = %s"
+                    params.append(cashier_id)
 
-        serializer = CheckSerializer(queryset, many=True)
-        return Response(serializer.data)
+                if start_date and end_date:
+                    sql += " AND print_date BETWEEN %s AND %s"
+                    params.extend([start_date, end_date])
 
-    def post(self, request):
+                cursor.execute(sql, params)
+                return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
+            except Exception as e:
+                return Response({"error": f"Помилка при отриманні списку чеків: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def post(self, request):
         if request.user.empl_role != "Касир":
             return Response({"detail": "Створення чеків доступне лише касирам"}, status=status.HTTP_403_FORBIDDEN)
 
@@ -560,7 +606,9 @@ class CheckListAPIView(APIView):
                 current_time = timezone.now()
                 subtotal = 0
                 for item in items_list:
-                    cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [item['upc']])
+                    cursor.execute("SELECT selling_price "
+                                   "FROM StoreProduct "
+                                   "WHERE upc = %s", [item['upc']])
                     row = cursor.fetchone()
                     if not row:
                         return Response({"error": f"Товар з UPC {item['upc']} не знайдено"},
@@ -587,30 +635,32 @@ class CheckListAPIView(APIView):
 
 
 class CheckDetailAPIView(APIView):
-    def get_object(self, pk):
-        try:
-            return Check.objects.get(pk=pk)
-        except Check.DoesNotExist:
-            raise Http404
-
     def get(self, request, pk):
-        check = self.get_object(pk)
-        serializer = CheckSerializer(check)
-        return Response(serializer.data)
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("SELECT * FROM StoreCheck "
+                               "WHERE check_number = %s", [pk])
+                card_data = dictfetchall(cursor)
+
+                if not card_data:
+                    return Response({"detail": "Чек не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+                return Response(card_data[0], status=status.HTTP_200_OK)
+            except Exception as e:
+                return Response({"error": f"Помилка при отриманні чека: {str(e)}"},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def put(self, request, pk):
         if request.user.empl_role != "Менеджер":
             return Response({"detail": "Оновлення чеків доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
-
-        check = self.get_object(pk)
-        serializer = CheckSerializer(check, data=request.data)
-        if serializer.is_valid():
+        with connection.cursor() as cursor:
             try:
-                serializer.save()
-                return Response(serializer.data)
+                cursor.execute("UPDATE StoreCheck SET ... WHERE check_number = %s", [pk])
+                if cursor.rowcount == 0:
+                    return Response({"detail": "Чек не знайдено для оновлення."}, status=status.HTTP_404_NOT_FOUND)
+
+                return Response({"message": "Чек успішно оновлено"}, status=status.HTTP_200_OK)
             except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": f"Помилка при оновленні чека: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, pk):
         if request.user.empl_role != 'Менеджер':
@@ -627,9 +677,23 @@ class CheckDetailAPIView(APIView):
 class StoreProductListAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
-        queryset = StoreProduct.objects.all()
-        serializer = StoreProductSerializer(queryset, many=True)
-        return Response(serializer.data)
+        with connection.cursor() as cursor:
+            try:
+                sql = """
+                      SELECT p.id_product,
+                             p.category_number,
+                             c.category_name,
+                             p.product_name,
+                             p.characteristics,
+                             p.manufacturer
+                      FROM Product p
+                               LEFT JOIN Category c ON p.category_number = c.category_number
+                      """
+                cursor.execute(sql)
+                return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
+            except Exception as e:
+                return Response({"error": f"Помилка при отриманні товарів: {str(e)}"},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def post(self, request):
         if request.user.empl_role != "Менеджер":
@@ -641,8 +705,7 @@ class StoreProductListAPIView(APIView):
                 cursor.execute("""
                                INSERT INTO Product (id_product, category_number, product_name, characteristics,
                                                     manufacturer)
-                               VALUES (%s, %s, %s, %s, %s)
-                               """, [
+                               VALUES (%s, %s, %s, %s, %s) """, [
                                    data.get('id_product'), data.get('category_number'),
                                    data.get('product_name'), data.get('characteristics'), data.get('manufacturer')
                                ])
@@ -652,27 +715,55 @@ class StoreProductListAPIView(APIView):
 
 
 class StoreProductDetailsAPIView(APIView):
-    def get_object(self, pk):
-        try:
-            return Store.objects.get(pk=pk)
-        except StoreProduct.DoesNotExist:
-            raise Http404
-
     def get(self, request, pk):
-        product = self.get_object(pk)
-        serializer = StoreProductSerializer(product)
-        return Response(serializer.data)
+        with connection.cursor() as cursor:
+            try:
+                # Отримання деталей через SQL
+                cursor.execute("""
+                               SELECT p.id_product,
+                                      p.category_number,
+                                      c.category_name,
+                                      p.product_name,
+                                      p.characteristics,
+                                      p.manufacturer
+                               FROM Product p
+                                        LEFT JOIN Category c ON p.category_number = c.category_number
+                               WHERE p.id_product = %s  """, [pk])
+                row = dictfetchall(cursor)
+
+                if not row:
+                    return Response({"detail": "Товар не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+                return Response(row[0], status=status.HTTP_200_OK)
+            except Exception as e:
+                return Response({"error": f"Помилка при отриманні деталей товару: {str(e)}"},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def put(self, request, pk):
-        product = self.get_object(pk)
-        serializer = StoreProductSerializer(product, data=request.data)
-        if serializer.is_valid():
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+        data = request.data
+        with connection.cursor() as cursor:
             try:
-                serializer.save()
-                return Response(serializer.data)
+                cursor.execute("""
+                               UPDATE Product
+                               SET category_number = %s,
+                                   product_name    = %s,
+                                   characteristics = %s,
+                                   manufacturer    = %s
+                               WHERE id_product = %s
+                               """, [data.get('category_number'), data.get('product_name'), data.get('characteristics'),
+                                     data.get('manufacturer'), pk])
+
+                if cursor.rowcount == 0:
+                    return Response({"detail": "Товар не знайдена для редагування."}, status=status.HTTP_404_NOT_FOUND)
+
+                return Response({"message": "Товар оновлено"}, status=status.HTTP_200_OK)
+            except IntegrityError:
+                return Response({"error": "Вказаної категорії не існує."}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": f"Помилка при оновленні товару: {str(e)}"},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
     def delete(self, request, pk):
         if request.user.empl_role != 'Менеджер':
@@ -680,7 +771,11 @@ class StoreProductDetailsAPIView(APIView):
 
         with connection.cursor() as cursor:
             try:
-                cursor.execute("DELETE FROM Product WHERE id_product = %s", [pk])
+                cursor.execute("DELETE FROM Product"
+                               " WHERE id_product = %s", [pk])
+                if cursor.rowcount == 0:
+                    return Response({"detail": "Товар не знайдена для видалення."}, status=status.HTTP_404_NOT_FOUND)
                 return Response({"message": "Товар успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
             except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": f"Помилка при видаленні товару: {str(e)}"},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
