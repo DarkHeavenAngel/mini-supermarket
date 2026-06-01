@@ -1,12 +1,8 @@
-import json
 import re
-from ast import Store
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, date
 from re import search
 
-import current_time
-import cursor
 from django.contrib.auth.hashers import make_password
 from django.db import connection, transaction, IntegrityError
 from django.http import JsonResponse, Http404
@@ -338,13 +334,33 @@ class EmployeeDetailAPIView(APIView):
                 return Response({"detail": "Працівника не знайдено"}, status=status.HTTP_404_NOT_FOUND)
             return Response({"message": "Працівника успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
 
+# Валідація назви категорії
+def validate_category_name(name):
+    if not name:
+        return "Назва категорії є обов'язковою."
+
+    if not re.match(r'^[A-Za-zА-Яа-яІіЇїЄєҐґ\s]+$', name):
+        return "Назва категорії повинна містити лише літери та пробіли (без цифр і символів)."
+
+    return None
+
 #CRUD for categories
 class CategoryListAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
 
     def get(self, request):
+        search = request.GET.get('search', '').strip()
+        query = "SELECT category_number, category_name FROM Category WHERE 1=1"
+        params = []
+
+        if search:
+            query += " AND LOWER(category_name) LIKE LOWER(%s)"
+            params.append(f"{search}%")
+
+        query += " ORDER BY category_name ASC"
+
         with connection.cursor() as cursor:
-            cursor.execute("SELECT category_number, category_name FROM Category ORDER BY category_name ASC") # + фільтрація за назвою
+            cursor.execute(query, params)
             categories = dictfetchall(cursor)
         return Response(categories, status=status.HTTP_200_OK)
 
@@ -353,15 +369,28 @@ class CategoryListAPIView(APIView):
             return Response({"detail": "Створення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data
+        category_name = data.get('category_name', '').strip()
+
+        name_error = validate_category_name(category_name)
+        if name_error:
+            return Response({"error": name_error}, status=status.HTTP_400_BAD_REQUEST)
+
         with connection.cursor() as cursor:
             try:
+                cursor.execute("SELECT MAX(category_number) FROM Category")
+                max_id = cursor.fetchone()[0]
+                next_id = (max_id or 0) + 1
+
                 cursor.execute("""
-                    INSERT INTO Category (category_number, category_name) 
-                    VALUES (%s, %s)
-                """, [data.get('category_number'), data.get('category_name')])
+                               INSERT INTO Category (category_number, category_name)
+                               VALUES (%s, %s)
+                               """, [next_id, data.get('category_name')])
 
                 return Response({"message": "Категорію успішно створено"}, status=status.HTTP_201_CREATED)
             except Exception as e:
+                if "UNIQUE" in str(e) or "primary key" in str(e).lower():
+                    return Response({"error": "Категорія з таким номером вже існує"},
+                                    status=status.HTTP_400_BAD_REQUEST)
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 class CategoryDetailAPIView(APIView):
@@ -381,6 +410,12 @@ class CategoryDetailAPIView(APIView):
             return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data
+        category_name = data.get('category_name', '').strip()
+
+        name_error = validate_category_name(category_name)
+        if name_error:
+            return Response({"error": name_error}, status=status.HTTP_400_BAD_REQUEST)
+
         with connection.cursor() as cursor:
             try:
                 cursor.execute("""
@@ -388,6 +423,9 @@ class CategoryDetailAPIView(APIView):
                     SET category_name = %s 
                     WHERE category_number = %s
                 """, [data.get('category_name'), category_number])
+
+                if cursor.rowcount == 0:
+                    return Response({"detail": "Категорію не знайдено."}, status=status.HTTP_404_NOT_FOUND)
 
                 return Response({"message": "Категорію оновлено"}, status=status.HTTP_200_OK)
             except Exception as e:
@@ -398,9 +436,19 @@ class CategoryDetailAPIView(APIView):
             return Response({"detail": "Видалення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
 
         with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM Category WHERE category_number = %s", [category_number])
+            try:
+                cursor.execute("DELETE FROM Category WHERE category_number = %s", [category_number])
 
-            return Response({"message": "Категорію успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+                if cursor.rowcount == 0:
+                    return Response({"detail": "Категорію не знайдено для видалення."},
+                                    status=status.HTTP_404_NOT_FOUND)
+
+                return Response({"message": "Категорію успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+            except IntegrityError:
+                return Response({"error": "Неможливо видалити категорію, оскільки до неї прив'язані товари!"},
+                                status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 #CRUD for products
 class ProductListAPIView(APIView):
