@@ -2,6 +2,7 @@ import json
 import re
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, date
+from re import search
 
 from django.contrib.auth.hashers import make_password
 from django.db import connection, transaction, IntegrityError
@@ -213,15 +214,32 @@ class EmployeeListAPIView(APIView):
     permission_classes = [IsManager]
 
     def get(self, request):
+        search = request.GET.get('search', '').strip()
+        role = request.GET.get('role', '').strip()
+
+        query = """
+            SELECT id_employee, empl_surname, empl_name, empl_patronymic,
+                   empl_role, salary, date_of_birth, date_of_start,
+                   phone_number, city, street, zip_code
+            FROM Employee
+            WHERE 1 = 1
+        """
+        params = []
+
+        if search:
+            query += " AND LOWER(empl_surname) LIKE LOWER(%s)"
+            params.append(f"{search}%")
+
+        if role:
+            query += " AND empl_role = %s"
+            params.append(role)
+
+        query += " ORDER BY empl_surname ASC"
+
         with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT id_employee, empl_surname, empl_name, empl_patronymic, 
-                       empl_role, salary, date_of_birth, date_of_start, 
-                       phone_number, city, street, zip_code 
-                FROM Employee
-                ORDER BY empl_surname ASC
-            """) # + сортування за прізвищем з вимог
+            cursor.execute(query, params)
             employees = dictfetchall(cursor)
+
         return Response(employees, status=status.HTTP_200_OK)
 
     def post(self, request):
