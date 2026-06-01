@@ -510,210 +510,173 @@ class DashboardStatsAPIView(APIView):
 
 #CRUD for Customer Cards
 class CustomerCardListAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsManager | IsCashier]
+
     def get(self, request):
         search = request.query_params.get('search', '')
-        percent = request.query_params.get('percent')
-        sort = request.query_params.get('sort')
-
         with connection.cursor() as cursor:
-            try:
-                sql = ("SELECT id_card, cust_name, percent "
-                       "FROM CustomerCard "
-                       "WHERE 1=1")
-                params = []
-                if search:
-                    sql += " AND cust_name LIKE %s"
-                    params.append(f"%{search}%")
+            sql = "SELECT * FROM CustomerCard WHERE 1=1"
+            params = []
+            if search:
+                # Пошук за прізвищем або ім'ям
+                sql += " AND (cust_surname ILIKE %s OR cust_name ILIKE %s)"
+                params.extend([f"%{search}%", f"%{search}%"])
 
-                # Тут логіка серіалізації замінюється на повернення JSON
-                return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
-            except Exception as e:
-                return Response({"error": f"Помилка при отриманні карток клієнтів: {str(e)}"},
-                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            cursor.execute(sql, params)
+            return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
 
     def post(self, request):
-        permission_classes = [IsManager]
-        data = request.data
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute(""" INSERT INTO CustomerCard (card_number, cust_surname, cust_name, cust_patronymic,
-                  phone_number, city, street, zip_code, percent)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                               [data.get('id_card'), data.get('cust_surname'), data.get('cust_name'), data.get('cust_patronymic'), data.get('phone_number'), data.get('city'),
-                                data.get('street'), data.get('zip_code'), data.get('percent')])
-
-                return Response({"message": "Карта клієнта успішно створена"}, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            return Response({"error": f"Помилка при створенні картки клієнта: {str(e)}"},
-                            status=status.HTTP_400_BAD_REQUEST)
-
-class CustomerCardDetailAPIView(APIView):
-    def get_object(self, pk):
-        with connection.cursor() as cursor:
-            try:
-                cursor.execute("SELECT * FROM CustomerCard "
-                               "WHERE id_card = %s", [pk])
-                row = cursor.fetchone()
-                if not row:
-                    return None # Не знайдено
-                # Повертаємо кортеж/рядок, який потім клієнт трансформує в JSON
-                return dictfetchall(cursor)[0]
-            except Exception as e:
-                 raise Http404()
-
-    def get(self, request, pk):
-        card_data = self.get_object_sql(pk)
-        if card_data is None:
-            return Response({"detail": "Карту клієнта не знайдено"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(card_data, status=status.HTTP_200_OK)
-
-    def put(self, request, pk):
         data = request.data
         with connection.cursor() as cursor:
             try:
                 cursor.execute("""
-                               UPDATE CustomerCard
-                               SET cust_surname = %s,
-                                   cust_name = %s,
-                                   cust_patronymic = %s,
-                                   phone_number = %s,
-                                   city = %s,
-                                   street = %s,
-                                   zip_code = %s,
-                                   percent = %s
-                                   WHERE id_card = %s
-                               """, [data.get('cust_surname'), data.get('cust_name'), data.get('cust_patronymic'), data.get('phone_number'),
-                                     data.get('city'), data.get('street'), data.get('zip_code'), data.get('percent'), pk])
-
-                if cursor.rowcount == 0:
-                    return Response({"detail": "Карта не знайдена для оновлення."}, status=status.HTTP_404_NOT_FOUND)
-
-                return Response({"message": "Карта успішно оновлена"}, status=status.HTTP_200_OK)
+                    INSERT INTO CustomerCard (card_number, cust_surname, cust_name, cust_patronymic, phone_number, city, street, zip_code, percent)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, [
+                            data.get('card_number'), data.get('cust_surname'), data.get('cust_name'),data.get('cust_patronymic'),
+                            data.get('phone_number'), data.get('city'), data.get('street'), data.get('zip_code'), data.get('percent')
+                ])
+                return Response({"message": "Карту клієнта створено"}, status=status.HTTP_201_CREATED)
+            except IntegrityError:
+                return Response({"error": "Картка з таким номером вже існує"}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
-                return Response({"error": f"Помилка при оновленні картки клієнта: {str(e)}"},
-                                status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    def delete(self, request, pk):
+class CustomerCardDetailAPIView(APIView):
+    permission_classes = [IsManager | IsCashier]
+
+    def get(self, request, card_number):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM CustomerCard WHERE card_number = %s", [card_number])
+            row = dictfetchall(cursor)
+        if not row:
+            return Response({"detail": "Карту не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(row[0], status=status.HTTP_200_OK)
+
+    def put(self, request, card_number):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data
         with connection.cursor() as cursor:
             try:
-                cursor.execute("DELETE FROM CustomerCard "
-                               "WHERE id_card = %s", [pk])
-                if cursor.rowcount == 0:
-                    return Response({"detail": "Карта не знайдена для видалення."}, status=status.HTTP_404_NOT_FOUND)
-
-                return Response(status=status.HTTP_204_NO_CONTENT)
+                cursor.execute("""
+                    UPDATE CustomerCard
+                    SET cust_surname = %s, cust_name = %s, cust_patronymic = %s,
+                        phone_number = %s, city = %s, street = %s, zip_code = %s, percent = %s
+                    WHERE card_number = %s
+                """, [
+                        data.get('cust_surname'), data.get('cust_name'), data.get('cust_patronymic'),
+                        data.get('phone_number'), data.get('city'), data.get('street'),
+                        data.get('zip_code'), data.get('percent'), card_number
+                    ])
+                return Response({"message": "Карту успішно оновлено"}, status=status.HTTP_200_OK)
             except Exception as e:
-                return Response({"error": f"Помилка при видаленні картки клієнта: {str(e)}"},
-                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+    def delete(self, request, card_number):
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Видалення доступне лише менеджерам."}, status=status.HTTP_403_FORBIDDEN)
+
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("DELETE FROM CustomerCard WHERE card_number = %s", [card_number])
+                return Response({"message": "Карту видалено."}, status=status.HTTP_200_OK)
+            except IntegrityError:
+                return Response({"error": "Неможливо видалити карту, оскільки за нею вже є пробиті чеки"}, status=status.HTTP_400_BAD_REQUEST)
 
 #CRUD for checks
 class CheckListAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsManager | IsCashier]
+
     def get(self, request):
-        cashier_id = request.query_params.get('cashier_id')
-        start_date = request.query_params.get('start_date')
-        end_date = request.query_params.get('end_date')
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT  c.check_number, c.print_date, c.sum_total, c.vat,
+                        e.empl_surname, e.empl_name, card.percent
+                FROM StoreCheck c
+                JOIN Employee e ON c.id_employee = e.id_employee
+                LEFT JOIN CustomerCard card ON c.card_number = card.card_number
+                ORDER BY c.print_date DESC
+            """)
+            return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
+
+    @transaction.atomic  # Обов'язкова транзакція для чеків!
+    def post(self, request):
+        if request.user.empl_role != 'Касир':
+            return Response({"detail": "Пробивати чеки можуть лише касири"}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data
+        items_list = data.get('items', [])
 
         with connection.cursor() as cursor:
             try:
-                sql = "SELECT * FROM StoreCheck WHERE 1=1"
-                params = []
-                if cashier_id:
-                    sql += " AND id_employee = %s"
-                    params.append(cashier_id)
+                check_number = data.get('check_number')
+                id_employee = request.user.id_employee  # Беремо ID того, хто зараз залогінений
+                card_number = data.get('card_number')
 
-                if start_date and end_date:
-                    sql += " AND print_date BETWEEN %s AND %s"
-                    params.extend([start_date, end_date])
-
-                cursor.execute(sql, params)
-                return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
-            except Exception as e:
-                return Response({"error": f"Помилка при отриманні списку чеків: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-def post(self, request):
-        if request.user.empl_role != "Касир":
-            return Response({"detail": "Створення чеків доступне лише касирам"}, status=status.HTTP_403_FORBIDDEN)
-
-        check_data = request.data
-        items_list = check_data.pop('items')
-        with connection.cursor() as cursor:
-            try:
-                check_number = check_data.get('check_number')
-                id_employee = check_data.get('id_employee')
-                card_number = check_data.get('card_number')
-                current_time = timezone.now()
-                subtotal = 0
+                subtotal = Decimal('0.0')
                 for item in items_list:
-                    cursor.execute("SELECT selling_price "
-                                   "FROM StoreProduct "
-                                   "WHERE upc = %s", [item['upc']])
-                    row = cursor.fetchone()
-                    if not row:
-                        return Response({"error": f"Товар з UPC {item['upc']} не знайдено"},
-                                        status=status.HTTP_400_BAD_REQUEST)
-                    price = row[0]
-                    subtotal += price * item['quantity']
+                    cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [item['upc']])
+                    price_row = cursor.fetchone()
+                    if not price_row:
+                        raise Exception(f"Товар з UPC {item['upc']} не знайдено в магазині")
+                    price = price_row[0]
+                    subtotal += price * Decimal(item['quantity'])
 
                 vat_amount = subtotal * Decimal('0.2')
                 final_sum = subtotal + vat_amount
+
                 cursor.execute("""
-                               INSERT INTO StoreCheck (check_number, id_employee, card_number, print_date, sum_total, vat)
-                               VALUES (%s, %s, %s, %s, %s, %s)
-                               """, [check_number, id_employee, card_number, current_time, final_sum, vat_amount])
+                    INSERT INTO StoreCheck (check_number, id_employee, card_number, print_date, sum_total, vat)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, [check_number, id_employee, card_number, datetime.now(), final_sum, vat_amount])
 
                 for item in items_list:
+                    cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [item['upc']])
+                    selling_price = cursor.fetchone()[0]
+
                     cursor.execute("""
-                                   INSERT INTO Sale (upc, check_number, product_number, selling_price)
-                                   VALUES (%s, %s, %s, %s)
-                                   """, [item['upc'], check_number, item.get('product_number'), item['selling_price']])
+                        INSERT INTO Sale (upc, check_number, product_number, selling_price)
+                        VALUES (%s, %s, %s, %s)
+                    """, [item['upc'], check_number, item['quantity'], selling_price])
 
                 return Response({"message": "Чек успішно створено"}, status=status.HTTP_201_CREATED)
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-
 class CheckDetailAPIView(APIView):
-    def get(self, request, pk):
+    permission_classes = [IsManager | IsCashier]
+
+    def get(self, request, check_number):
         with connection.cursor() as cursor:
-            try:
-                cursor.execute("SELECT * FROM StoreCheck "
-                               "WHERE check_number = %s", [pk])
-                card_data = dictfetchall(cursor)
+            cursor.execute("SELECT * FROM StoreCheck WHERE check_number = %s", [check_number])
+            check_data = dictfetchall(cursor)
 
-                if not card_data:
-                    return Response({"detail": "Чек не знайдено"}, status=status.HTTP_404_NOT_FOUND)
-                return Response(card_data[0], status=status.HTTP_200_OK)
-            except Exception as e:
-                return Response({"error": f"Помилка при отриманні чека: {str(e)}"},
-                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            if not check_data:
+                return Response({"detail": "Чек не знайдено"}, status=status.HTTP_404_NOT_FOUND)
 
-    def put(self, request, pk):
-        if request.user.empl_role != "Менеджер":
-            return Response({"detail": "Оновлення чеків доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
-        with connection.cursor() as cursor:
-            try:
-                cursor.execute("UPDATE StoreCheck SET ... WHERE check_number = %s", [pk])
-                if cursor.rowcount == 0:
-                    return Response({"detail": "Чек не знайдено для оновлення."}, status=status.HTTP_404_NOT_FOUND)
+            cursor.execute("""
+                SELECT s.upc, p.product_name, s.product_number, s.selling_price
+                FROM Sale s
+                JOIN StoreProduct sp ON s.upc = sp.upc
+                JOIN Product p ON sp.id_product = p.id_product
+                WHERE s.check_number = %s
+            """, [check_number])
+            sales_data = dictfetchall(cursor)
 
-                return Response({"message": "Чек успішно оновлено"}, status=status.HTTP_200_OK)
-            except Exception as e:
-                return Response({"error": f"Помилка при оновленні чека: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+            result = check_data[0]
+            result['items'] = sales_data
 
-    def delete(self, request, pk):
+        return Response(result, status=status.HTTP_200_OK)
+
+    def delete(self, request, check_number):
         if request.user.empl_role != 'Менеджер':
-            return Response({"detail": "Видалення чеків доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Видаляти чеки можуть лише менеджери."}, status=status.HTTP_403_FORBIDDEN)
 
         with connection.cursor() as cursor:
-            try:
-                cursor.execute("DELETE FROM Check WHERE check_number = %s", [pk])
-                return Response({"message": "Чек успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
-            except Exception as e:
-                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            cursor.execute("DELETE FROM StoreCheck WHERE check_number = %s", [check_number])
+        return Response({"message": "Чек успішно видалено."}, status=status.HTTP_200_OK)
 
 #CRUD for store products
 class StoreProductListAPIView(APIView):
@@ -754,7 +717,6 @@ class StoreProductListAPIView(APIView):
                 return Response({"message": "Товар успішно створено"}, status=status.HTTP_201_CREATED)
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
 
 class StoreProductDetailsAPIView(APIView):
     def get(self, request, pk):
@@ -805,7 +767,6 @@ class StoreProductDetailsAPIView(APIView):
             except Exception as e:
                 return Response({"error": f"Помилка при оновленні товару: {str(e)}"},
                                 status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
     def delete(self, request, pk):
         if request.user.empl_role != 'Менеджер':
