@@ -610,15 +610,30 @@ class CheckListAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
 
     def get(self, request):
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        query = """
+            SELECT c.check_number, c.print_date, c.sum_total, c.vat, 
+                   e.empl_surname, e.empl_name, card.percent
+            FROM StoreCheck c
+            JOIN Employee e ON c.id_employee = e.id_employee
+            LEFT JOIN CustomerCard card ON c.card_number = card.card_number
+            WHERE 1 = 1
+        """
+        params = []
+
+        if start_date:
+            query += " AND c.print_date >= %s"
+            params.append(start_date + " 00:00:00")
+        if end_date:
+            query += " AND c.print_date <= %s"
+            params.append(end_date + " 23:59:59")
+
+        query += " ORDER BY c.print_date DESC"
+
         with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT  c.check_number, c.print_date, c.sum_total, c.vat,
-                        e.empl_surname, e.empl_name, card.percent
-                FROM StoreCheck c
-                JOIN Employee e ON c.id_employee = e.id_employee
-                LEFT JOIN CustomerCard card ON c.card_number = card.card_number
-                ORDER BY c.print_date DESC
-            """)
+            cursor.execute(query, params)
             return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
 
     @transaction.atomic
@@ -631,7 +646,12 @@ class CheckListAPIView(APIView):
 
         with connection.cursor() as cursor:
             try:
-                check_number = data.get('check_number')
+                cursor.execute("SELECT MAX(CAST(check_number AS NUMERIC)) FROM StoreCheck")
+                max_id = cursor.fetchone()[0]
+
+                next_check_int = int(max_id) + 1 if max_id else 1000000000
+                check_number = str(next_check_int).zfill(10)
+
                 id_employee = request.user.id_employee
                 card_number = data.get('card_number')
 
@@ -706,13 +726,28 @@ class CheckDetailAPIView(APIView):
 
         return Response(result, status=status.HTTP_200_OK)
 
+    @transaction.atomic
     def delete(self, request, check_number):
         if request.user.empl_role != 'Менеджер':
             return Response({"detail": "Видаляти чеки можуть лише менеджери."}, status=status.HTTP_403_FORBIDDEN)
 
+        return_items = request.query_params.get('return_items', 'false') == 'true'
+
         with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM StoreCheck WHERE check_number = %s", [check_number])
-        return Response({"message": "Чек успішно видалено."}, status=status.HTTP_200_OK)
+            try:
+                if return_items:
+                    cursor.execute("SELECT upc, product_number FROM Sale WHERE check_number = %s", [check_number])
+                    items_in_check = cursor.fetchall()
+                    for item in items_in_check:
+                        cursor.execute("UPDATE StoreProduct SET products_number = products_number + %s WHERE upc = %s",
+                                       [item[1], item[0]])
+
+                cursor.execute("DELETE FROM Sale WHERE check_number = %s", [check_number])
+                cursor.execute("DELETE FROM StoreCheck WHERE check_number = %s", [check_number])
+
+                return Response({"message": "Чек видалено"}, status=status.HTTP_200_OK)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 def get_next_upc(is_promo, upc_prom=None):
     if is_promo and upc_prom:
