@@ -230,10 +230,16 @@ class EmployeeDetailAPIView(APIView):
             return Response({"detail": "Видалення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
 
         with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM Employee WHERE id_employee = %s", [id_employee])
-            if cursor.rowcount == 0:
-                return Response({"detail": "Працівника не знайдено"}, status=status.HTTP_404_NOT_FOUND)
-            return Response({"message": "Працівника успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+            try:
+                cursor.execute("DELETE FROM Employee WHERE id_employee = %s", [id_employee])
+
+                if cursor.rowcount == 0:
+                    return Response({"detail": "Працівника не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+
+                return Response({"message": "Працівника успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+            except IntegrityError:
+                return Response({"error": "Неможливо видалити працівника, оскільки за ним закріплені чеки!"},
+                                status=status.HTTP_400_BAD_REQUEST)
 
 # Валідація назви категорії
 def validate_category_name(name):
@@ -356,21 +362,44 @@ class ProductListAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
 
     def get(self, request):
-        with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT p.id_product, p.category_number, c.category_name, 
-                       p.product_name, p.characteristics, p.manufacturer
-                FROM Product p
-                LEFT JOIN Category c ON p.category_number = c.category_number
-                ORDER BY p.product_name ASC 
-            """) # + фільтрація за ім'ям
+        search = request.GET.get('search', '').strip()
+        category = request.GET.get('category', '').strip()
 
-            products = dictfetchall(cursor)
-        return Response(products, status=status.HTTP_200_OK)
+        query = """
+            SELECT p.id_product, p.category_number, c.category_name,
+                   p.product_name, p.characteristics, p.manufacturer
+            FROM Product p
+            LEFT JOIN Category c ON p.category_number = c.category_number
+            WHERE 1 = 1
+        """
+        params = []
+
+        # Пошук за назвою товару
+        if search:
+            query += " AND LOWER(p.product_name) LIKE LOWER(%s)"
+            params.append(f"{search}%")
+
+        # Фільтрація за категорією
+        if category:
+            query += " AND p.category_number = %s"
+            params.append(category)
+
+        query += " ORDER BY p.product_name ASC"
+
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute(query, params)
+                products = dictfetchall(cursor)
+
+                return Response(products, status=status.HTTP_200_OK)
+
+            except Exception as e:
+                return Response({"error": f"Помилка при завантаженні товарів: {str(e)}"},
+                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def post(self, request):
         if request.user.empl_role != "Менеджер":
-            return Response({"detail": "Створення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Додавати товари можуть лише менеджери"}, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data
         with connection.cursor() as cursor:
@@ -429,9 +458,11 @@ class ProductDetailAPIView(APIView):
             return Response({"detail": "Видалення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
 
         with connection.cursor() as cursor:
-            cursor.execute("DELETE FROM Product WHERE id_product = %s", [id_product])
-
-        return Response({"message": "Товар успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
+            try:
+                cursor.execute("DELETE FROM Product WHERE id_product = %s", [id_product])
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            except IntegrityError:
+                return Response({"error": "Неможливо видалити товар, він є в чеках"}, status=400)
 
 # Інформація для звіту на головній сторінці
 class DashboardStatsAPIView(APIView):
