@@ -724,3 +724,81 @@ class StoreProductDetailAPIView(APIView):
             except IntegrityError:
                 return Response({
                     "error": "Неможливо видалити товар, оскільки він фігурує у створених чеках (таблиця Sale)"}, status=status.HTTP_400_BAD_REQUEST)
+
+# Reports
+class TotalSalesSummaryAPIView(APIView):
+    """
+    Звіт: Загальна сума продажів за період часу.
+    всі касири, якщо id_employee не передано
+    конкретний касир, якщо передано id_employee
+    """
+    permission_classes = [IsManager]
+
+    def get(self, request):
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        id_employee = request.query_params.get('id_employee')
+
+        if not start_date or not end_date:
+            return Response({"error": "Вкажіть параметри start_date та end_date (формат РРРР-ММ-ДД)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        end_date_full = f"{end_date} 23:59:59"
+
+        with connection.cursor() as cursor:
+            if id_employee:
+                cursor.execute("""
+                    SELECT COALESCE(SUM(sum_total), 0) as total_revenue, COUNT(check_number)         as total_checks_printed
+                    FROM StoreCheck
+                    WHERE print_date >= %s
+                    AND print_date <= %s
+                    AND id_employee = %s
+                """, [start_date, end_date_full, id_employee])
+            else:
+                cursor.execute("""
+                    SELECT COALESCE(SUM(sum_total), 0) as total_revenue, COUNT(check_number)         as total_checks_printed
+                    FROM StoreCheck
+                    WHERE print_date >= %s
+                    AND print_date <= %s
+                """, [start_date, end_date_full])
+
+            row = dictfetchall(cursor)
+        return Response(row[0], status=status.HTTP_200_OK)
+
+class ProductSalesSummaryAPIView(APIView):
+    """
+    Звіт: Визначити загальну кількість проданих одиниць певного товару за певний період часу.
+    Шукаємо за id_product, щоб звести разом продажі як звичайного, так і акційного варіантів цього товару.
+    """
+    permission_classes = [IsManager]
+
+    def get(self, request):
+        id_product = request.query_params.get('id_product')
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        if not id_product or not start_date or not end_date:
+            return Response({"error": "Вкажіть id_product, start_date та end_date"}, status=status.HTTP_400_BAD_REQUEST)
+
+        end_date_full = f"{end_date} 23:59:59"
+
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT p.id_product, p.product_name, COALESCE(SUM(s.product_number), 0) as total_items_sold
+                FROM Sale s
+                JOIN StoreCheck c ON s.check_number = c.check_number
+                JOIN StoreProduct sp ON s.upc = sp.upc
+                JOIN Product p ON sp.id_product = p.id_product
+                WHERE p.id_product = %s
+                AND c.print_date >= %s
+                AND c.print_date <= %s
+                GROUP BY p.id_product, p.product_name
+            """, [id_product, start_date, end_date_full])
+
+            row = dictfetchall(cursor)
+
+        if not row:
+            return Response(
+                {"id_product": id_product, "total_items_sold": 0, "message": "Товар не продавався у вказаний період"}, status=status.HTTP_200_OK)
+
+        return Response(row[0], status=status.HTTP_200_OK)
+    
