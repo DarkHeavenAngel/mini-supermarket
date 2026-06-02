@@ -165,33 +165,6 @@ class StoreProduct(models.Model):
     products_number = models.IntegerField('Кількість одиниць')
     promotional_product = models.BooleanField('Акційний продукт', default=False)
 
-    # валідація кількості записів товару
-    def clean(self):
-        super().clean()
-
-        if self.id_product:
-            queryset = StoreProduct.objects.filter(id_product=self.id_product)
-
-            if self.pk:
-                queryset = queryset.exclude(pk=self.pk)
-
-            if queryset.count() >= 2:
-                raise ValidationError(
-                    "Для цього товару вже існує максимально можлива кількість записів (звичайний та акційний)"
-                )
-
-            if queryset.filter(promotional_product=self.promotional_product).exists():
-                status_str = "акційний" if self.promotional_product else "звичайний"
-                raise ValidationError(
-                    f"Для цього товару вже існує {status_str} варіант. Оберіть інший статус"
-                )
-
-    def save(self, *args, **kwargs):
-        if self.promotional_product and self.upc_prom:
-            discounted_price = float(self.upc_prom.selling_price) * 0.8
-            self.selling_price = discounted_price
-        super().save(*args, **kwargs)
-
     def __str__(self):
         if self.promotional_product:
             status = "Акція"
@@ -213,19 +186,6 @@ class Sale(models.Model):
     check_number = models.ForeignKey(Check, on_delete=models.CASCADE, db_column='check_number')
     product_number = models.IntegerField('Кількість одиниць')
     selling_price = models.DecimalField('Ціна', decimal_places=4, max_digits=13)
-
-    # авто списання товару та підтягування ціни
-    def save(self, *args, **kwargs):
-        is_new = self.pk is None
-
-        if not self.selling_price:
-            self.selling_price = self.upc.selling_price
-        super().save(*args, **kwargs)
-
-        if is_new:
-            store_product = self.upc
-            store_product.products_number -= self.product_number
-            store_product.save()
 
     class Meta:
         db_table = 'Sale'

@@ -13,103 +13,6 @@ from rest_framework.views import APIView
 
 from .permissions import IsManager, IsCashier
 
-def store_product(upc, id_product, selling_price, products_number, is_promotional=False, upc_prom=None):
-    with connection.cursor() as cursor:
-        # перевірка обмеження на кількість запису товару
-        cursor.execute("SELECT COUNT(*) FROM StoreProduct WHERE id_product = %s", [id_product])
-        count = cursor.fetchone()[0]
-
-        if count >= 2:
-            return {
-                "success": False,
-                "error": 'There is already two records for this product'
-            }
-
-        # підрахунок ціни акційного товару
-        if is_promotional and upc_prom:
-            cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [upc_prom])
-            row = cursor.fetchone()
-
-            if row:
-                normal_price = row[0]
-                selling_price = normal_price * Decimal('0.8')
-            else:
-                return {
-                    "success": False,
-                    "error": f"Base product {upc_prom} is not promoted"
-                }
-
-        cursor.execute("""
-            INSERT INTO StoreProduct
-            (upc, upc_prom, id_product, selling_price, products_number, promotional_product)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, [upc, upc_prom, id_product, selling_price, products_number, is_promotional])
-
-        return {"success": True, "message": 'Product added successfully'}
-
-@transaction.atomic
-def create_new_check(check_number, id_employee, card_number, items_list):
-    with connection.cursor() as cursor:
-
-        # автоматизація номеру чеку
-        if not check_number:
-            cursor.execute("SELECT MAX(CAST(check_number AS INTEGER)) FROM StoreCheck")
-            max_check = cursor.fetchone()[0]
-            next_number = (max_check or 0) + 1
-            check_number = str(next_number).zfill(10)
-
-        # підрахунок суми
-        subtotal = Decimal('0.0')
-        for item in items_list:
-            cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [item['upc']])
-            row = cursor.fetchone()
-            if not row:
-                raise ValueError(f"Товар з UPC {item['upc']} не знайдено")
-            price = row[0]
-            subtotal += price * Decimal(item['qty'])
-
-        # застосування знижки
-        discount = Decimal('0.0')
-        if card_number:
-            cursor.execute("SELECT percent FROM CustomerCard WHERE card_number = %s", [card_number])
-            card_row = cursor.fetchone()
-            if card_row:
-                discount = Decimal(card_row[0])
-
-        multiplier = (Decimal('100') - discount) / Decimal('100')
-        final_sum = subtotal * multiplier
-        vat_amount = final_sum * Decimal('0.2')
-
-        current_time = timezone.now()
-
-        # створення чеку
-        cursor.execute("""
-            INSERT INTO StoreCheck (check_number, id_employee, card_number, print_date, sum_total, vat)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, [check_number, id_employee, card_number, current_time, final_sum, vat_amount])
-
-        # додавання та списання товарів
-        for item in items_list:
-            upc = item['upc']
-            qty = item['qty']
-
-            cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [item['upc']])
-            price = cursor.fetchone()[0]
-
-            cursor.execute("""
-                INSERT INTO Sale (upc, check_number, product_number, selling_price)
-                VALUES (%s, %s, %s, %s)
-            """, [upc, check_number, qty, price])
-
-            # зменшення товару на складі
-            cursor.execute("""
-                UPDATE StoreProduct 
-                SET products_number = products_number - %s
-                WHERE UPC = %s
-            """, [qty, upc])
-
-    return {"success": True, "message": 'Чек успішно створено'}
-
 #Functiobn to show profile
 class EmployeeProfileAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -687,7 +590,7 @@ class CheckListAPIView(APIView):
             """)
             return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
 
-    @transaction.atomic  # Обов'язкова транзакція для чеків!
+    @transaction.atomic
     def post(self, request):
         if request.user.empl_role != 'Касир':
             return Response({"detail": "Пробивати чеки можуть лише касири"}, status=status.HTTP_403_FORBIDDEN)
@@ -698,7 +601,7 @@ class CheckListAPIView(APIView):
         with connection.cursor() as cursor:
             try:
                 check_number = data.get('check_number')
-                id_employee = request.user.id_employee  # Беремо ID того, хто зараз залогінений
+                id_employee = request.user.id_employee
                 card_number = data.get('card_number')
 
                 subtotal = Decimal('0.0')
@@ -707,27 +610,43 @@ class CheckListAPIView(APIView):
                     price_row = cursor.fetchone()
                     if not price_row:
                         raise Exception(f"Товар з UPC {item['upc']} не знайдено в магазині")
-                    price = price_row[0]
-                    subtotal += price * Decimal(item['quantity'])
 
-                vat_amount = subtotal * Decimal('0.2')
-                final_sum = subtotal + vat_amount
+                    price = Decimal(str(price_row[0]))
+                    subtotal += price * Decimal(str(item['quantity']))
+
+                discount_percent = Decimal('0.0')
+                if card_number:
+                    cursor.execute("SELECT percent FROM CustomerCard WHERE card_number = %s", [card_number])
+                    card_row = cursor.fetchone()
+                    if card_row:
+                        discount_percent = Decimal(str(card_row[0]))
+
+                multiplier = (Decimal('100') - discount_percent) / Decimal('100')
+                final_sum = subtotal * multiplier
+
+                vat_amount = final_sum * Decimal('0.2')
 
                 cursor.execute("""
                     INSERT INTO StoreCheck (check_number, id_employee, card_number, print_date, sum_total, vat)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, [check_number, id_employee, card_number, datetime.now(), final_sum, vat_amount])
+                """, [check_number, id_employee, card_number, timezone.now(), final_sum, vat_amount])
 
                 for item in items_list:
                     cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [item['upc']])
-                    selling_price = cursor.fetchone()[0]
+                    selling_price = Decimal(str(cursor.fetchone()[0]))
 
                     cursor.execute("""
                         INSERT INTO Sale (upc, check_number, product_number, selling_price)
                         VALUES (%s, %s, %s, %s)
                     """, [item['upc'], check_number, item['quantity'], selling_price])
 
-                return Response({"message": "Чек успішно створено"}, status=status.HTTP_201_CREATED)
+                    cursor.execute("""
+                        UPDATE StoreProduct
+                        SET products_number = products_number - %s
+                        WHERE upc = %s
+                    """, [item['quantity'], item['upc']])
+
+                return Response({"message": "Чек успішно створено!"}, status=status.HTTP_201_CREATED)
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -766,105 +685,206 @@ class CheckDetailAPIView(APIView):
 
 #CRUD for store products
 class StoreProductListAPIView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsManager | IsCashier]
+
     def get(self, request):
         with connection.cursor() as cursor:
-            try:
-                sql = """
-                      SELECT p.id_product,
-                             p.category_number,
-                             c.category_name,
-                             p.product_name,
-                             p.characteristics,
-                             p.manufacturer
-                      FROM Product p
-                               LEFT JOIN Category c ON p.category_number = c.category_number
-                      """
-                cursor.execute(sql)
-                return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
-            except Exception as e:
-                return Response({"error": f"Помилка при отриманні товарів: {str(e)}"},
-                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            cursor.execute("""
+                SELECT sp.upc, sp.upc_prom, p.product_name, sp.selling_price,
+                       sp.products_number, sp.promotional_product
+                FROM StoreProduct sp
+                JOIN Product p ON sp.id_product = p.id_product
+            """)
+            return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
 
     def post(self, request):
-        if request.user.empl_role != "Менеджер":
-            return Response({"detail": "Створення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+        if request.user.empl_role != 'Менеджер':
+            return Response({"detail": "Додавати товари в магазин можуть лише менеджери"}, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data
+        id_product = data.get('id_product')
+        promotional_product = data.get('promotional_product', False)
+        upc_prom = data.get('upc_prom')
+        selling_price = data.get('selling_price', 0)
+
         with connection.cursor() as cursor:
             try:
+                # ЗАМІНА МЕТОДУ clean()
+                cursor.execute("SELECT promotional_product FROM StoreProduct WHERE id_product = %s", [id_product])
+                existing_records = cursor.fetchall()
+
+                if len(existing_records) >= 2:
+                    return Response(
+                        {
+                            "error": "Для цього товару вже існує максимально можлива кількість записів (звичайний та акційний)"}, status=status.HTTP_400_BAD_REQUEST)
+
+                for row in existing_records:
+                    if row[0] == promotional_product:
+                        status_str = "акційний" if promotional_product else "звичайний"
+                        return Response(
+                            {"error": f"Для цього товару вже існує {status_str} варіант. Оберіть інший статус"}, status=status.HTTP_400_BAD_REQUEST)
+
+                # ЗАМІНА МЕТОДУ save(): Автоматична знижка 20%
+                if promotional_product and upc_prom:
+                    cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [upc_prom])
+                    base_price_row = cursor.fetchone()
+                    if base_price_row:
+                        base_price = float(base_price_row[0])
+                        selling_price = base_price * 0.8
+
                 cursor.execute("""
-                               INSERT INTO Product (id_product, category_number, product_name, characteristics,
-                                                    manufacturer)
-                               VALUES (%s, %s, %s, %s, %s) """, [
-                                   data.get('id_product'), data.get('category_number'),
-                                   data.get('product_name'), data.get('characteristics'), data.get('manufacturer')
-                               ])
-                return Response({"message": "Товар успішно створено"}, status=status.HTTP_201_CREATED)
+                    INSERT INTO StoreProduct (upc, upc_prom, id_product, selling_price, products_number, promotional_product)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, [
+                            data.get('upc'), upc_prom, id_product, selling_price, data.get('products_number'), promotional_product])
+
+                return Response({"message": "Товар успішно додано на полиці магазину"}, status=status.HTTP_201_CREATED)
+
+            except IntegrityError:
+                return Response({"error": "Такий UPC вже існує або вказано неіснуючий id_product"},
+                                status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-class StoreProductDetailsAPIView(APIView):
-    def get(self, request, pk):
+
+class StoreProductDetailAPIView(APIView):
+    permission_classes = [IsManager | IsCashier]
+
+    def get(self, request, upc):
         with connection.cursor() as cursor:
-            try:
-                # Отримання деталей через SQL
-                cursor.execute("""
-                               SELECT p.id_product,
-                                      p.category_number,
-                                      c.category_name,
-                                      p.product_name,
-                                      p.characteristics,
-                                      p.manufacturer
-                               FROM Product p
-                                        LEFT JOIN Category c ON p.category_number = c.category_number
-                               WHERE p.id_product = %s  """, [pk])
-                row = dictfetchall(cursor)
+            cursor.execute("""
+                SELECT sp.upc, sp.upc_prom, p.id_product, p.product_name, p.characteristics, p.manufacturer,
+                       sp.selling_price, sp.products_number, sp.promotional_product
+                FROM StoreProduct sp
+                JOIN Product p ON sp.id_product = p.id_product
+                WHERE sp.upc = %s
+            """, [upc])
+            row = dictfetchall(cursor)
 
-                if not row:
-                    return Response({"detail": "Товар не знайдено"}, status=status.HTTP_404_NOT_FOUND)
-                return Response(row[0], status=status.HTTP_200_OK)
-            except Exception as e:
-                return Response({"error": f"Помилка при отриманні деталей товару: {str(e)}"},
-                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        if not row:
+            return Response({"detail": "Товар з таким UPC не знайдено"}, status=status.HTTP_404_NOT_FOUND)
 
-    def put(self, request, pk):
+        return Response(row[0], status=status.HTTP_200_OK)
+
+    def put(self, request, upc):
         if request.user.empl_role != 'Менеджер':
             return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
+
         data = request.data
+
+        validation_error = validate_store_product_data(data)
+        if validation_error:
+            return Response({"error": validation_error}, status=status.HTTP_400_BAD_REQUEST)
+
         with connection.cursor() as cursor:
             try:
                 cursor.execute("""
-                               UPDATE Product
-                               SET category_number = %s,
-                                   product_name    = %s,
-                                   characteristics = %s,
-                                   manufacturer    = %s
-                               WHERE id_product = %s
-                               """, [data.get('category_number'), data.get('product_name'), data.get('characteristics'),
-                                     data.get('manufacturer'), pk])
+                    UPDATE StoreProduct
+                    SET selling_price = %s, products_number = %s, promotional_product = %s
+                    WHERE upc = %s
+                """, [
+                            data.get('selling_price'),
+                            data.get('products_number'),
+                            data.get('promotional_product', False),
+                            upc])
 
                 if cursor.rowcount == 0:
-                    return Response({"detail": "Товар не знайдена для редагування."}, status=status.HTTP_404_NOT_FOUND)
+                    return Response({"detail": "Товар не знайдено для оновлення"}, status=status.HTTP_404_NOT_FOUND)
 
-                return Response({"message": "Товар оновлено"}, status=status.HTTP_200_OK)
-            except IntegrityError:
-                return Response({"error": "Вказаної категорії не існує."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"message": "Дані про товар у магазині оновлено"}, status=status.HTTP_200_OK)
             except Exception as e:
-                return Response({"error": f"Помилка при оновленні товару: {str(e)}"},
-                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    def delete(self, request, pk):
+    def delete(self, request, upc):
         if request.user.empl_role != 'Менеджер':
             return Response({"detail": "Видалення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
 
         with connection.cursor() as cursor:
             try:
-                cursor.execute("DELETE FROM Product"
-                               " WHERE id_product = %s", [pk])
+                cursor.execute("DELETE FROM StoreProduct WHERE upc = %s", [upc])
+
                 if cursor.rowcount == 0:
-                    return Response({"detail": "Товар не знайдена для видалення."}, status=status.HTTP_404_NOT_FOUND)
-                return Response({"message": "Товар успішно видалено"}, status=status.HTTP_204_NO_CONTENT)
-            except Exception as e:
-                return Response({"error": f"Помилка при видаленні товару: {str(e)}"},
-                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                    return Response({"detail": "Товар не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+
+                return Response({"message": "Товар успішно списано з магазину"}, status=status.HTTP_204_NO_CONTENT)
+            except IntegrityError:
+                return Response({
+                    "error": "Неможливо видалити товар, оскільки він фігурує у створених чеках (таблиця Sale)"}, status=status.HTTP_400_BAD_REQUEST)
+
+# Reports
+class TotalSalesSummaryAPIView(APIView):
+    """
+    Звіт: Загальна сума продажів за період часу.
+    всі касири, якщо id_employee не передано
+    конкретний касир, якщо передано id_employee
+    """
+    permission_classes = [IsManager]
+
+    def get(self, request):
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        id_employee = request.query_params.get('id_employee')
+
+        if not start_date or not end_date:
+            return Response({"error": "Вкажіть параметри start_date та end_date (формат РРРР-ММ-ДД)"}, status=status.HTTP_400_BAD_REQUEST)
+
+        end_date_full = f"{end_date} 23:59:59"
+
+        with connection.cursor() as cursor:
+            if id_employee:
+                cursor.execute("""
+                    SELECT COALESCE(SUM(sum_total), 0) as total_revenue, COUNT(check_number)         as total_checks_printed
+                    FROM StoreCheck
+                    WHERE print_date >= %s
+                    AND print_date <= %s
+                    AND id_employee = %s
+                """, [start_date, end_date_full, id_employee])
+            else:
+                cursor.execute("""
+                    SELECT COALESCE(SUM(sum_total), 0) as total_revenue, COUNT(check_number)         as total_checks_printed
+                    FROM StoreCheck
+                    WHERE print_date >= %s
+                    AND print_date <= %s
+                """, [start_date, end_date_full])
+
+            row = dictfetchall(cursor)
+        return Response(row[0], status=status.HTTP_200_OK)
+
+class ProductSalesSummaryAPIView(APIView):
+    """
+    Звіт: Визначити загальну кількість проданих одиниць певного товару за певний період часу.
+    Шукаємо за id_product, щоб звести разом продажі як звичайного, так і акційного варіантів цього товару.
+    """
+    permission_classes = [IsManager]
+
+    def get(self, request):
+        id_product = request.query_params.get('id_product')
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        if not id_product or not start_date or not end_date:
+            return Response({"error": "Вкажіть id_product, start_date та end_date"}, status=status.HTTP_400_BAD_REQUEST)
+
+        end_date_full = f"{end_date} 23:59:59"
+
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT p.id_product, p.product_name, COALESCE(SUM(s.product_number), 0) as total_items_sold
+                FROM Sale s
+                JOIN StoreCheck c ON s.check_number = c.check_number
+                JOIN StoreProduct sp ON s.upc = sp.upc
+                JOIN Product p ON sp.id_product = p.id_product
+                WHERE p.id_product = %s
+                AND c.print_date >= %s
+                AND c.print_date <= %s
+                GROUP BY p.id_product, p.product_name
+            """, [id_product, start_date, end_date_full])
+
+            row = dictfetchall(cursor)
+
+        if not row:
+            return Response(
+                {"id_product": id_product, "total_items_sold": 0, "message": "Товар не продавався у вказаний період"}, status=status.HTTP_200_OK)
+
+        return Response(row[0], status=status.HTTP_200_OK)
+    
