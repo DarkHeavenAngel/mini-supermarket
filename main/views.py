@@ -89,7 +89,7 @@ def validate_store_product_data(data):
         if price < 0:
             return "Ціна продажу не може бути від'ємною"
     except (ValueError, TypeError):
-        return "Некоректне значення кількості одиниць"
+        return "Некоректний формат ціни продажу"
 
     return None
 
@@ -101,13 +101,13 @@ def validate_check_data(item_list):
 
     for item in item_list:
         try:
-            qty = int(item.get('qty', 0))
-            if qty < 0:
+            qty = int(item.get('quantity', 0))
+            if qty <= 0:
                 return f"Кількість купленого товару (UPC: {item.get('upc')}) повина бути більшою за 0"
         except (ValueError, TypeError):
             return "Некоректне значення кількості товару в чеку"
 
-        return None
+    return None
 
 #CRUD for employees
 class EmployeeListAPIView(APIView):
@@ -510,6 +510,7 @@ class CustomerCardListAPIView(APIView):
 
     def get(self, request):
         search = request.GET.get('search', '').strip()
+        percent = request.GET.get('percent', '').strip()
 
         query = """
             SELECT card_number, cust_surname, cust_name, cust_patronymic,
@@ -521,6 +522,10 @@ class CustomerCardListAPIView(APIView):
         if search:
             query += " AND LOWER(cust_surname) LIKE LOWER(%s)"
             params.append(f"{search}%")
+
+        if percent:
+            query += " AND percent = %s"
+            params.append(percent)
 
         query += " ORDER BY cust_surname ASC"
 
@@ -612,6 +617,7 @@ class CheckListAPIView(APIView):
     def get(self, request):
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date')
+        id_employee = request.query_params.get('id_employee')
 
         query = """
             SELECT c.check_number, c.print_date, c.sum_total, c.vat, 
@@ -622,6 +628,13 @@ class CheckListAPIView(APIView):
             WHERE 1 = 1
         """
         params = []
+
+        if request.user.empl_role == 'Касир': # для касира показує тільки його чеки
+            query += " AND c.id_employee = %s"
+            params.append(request.user.id_employee)
+        elif id_employee: # для менеджера вибір
+            query += " AND c.id_employee = %s"
+            params.append(id_employee)
 
         if start_date:
             query += " AND c.print_date >= %s"
@@ -644,6 +657,10 @@ class CheckListAPIView(APIView):
         data = request.data
         items_list = data.get('items', [])
 
+        validation_error = validate_check_data(items_list)
+        if validation_error:
+            return Response({"error": validation_error}, status=status.HTTP_400_BAD_REQUEST)
+
         with connection.cursor() as cursor:
             try:
                 cursor.execute("SELECT MAX(CAST(check_number AS NUMERIC)) FROM StoreCheck")
@@ -653,17 +670,40 @@ class CheckListAPIView(APIView):
                 check_number = str(next_check_int).zfill(10)
 
                 id_employee = request.user.id_employee
-                card_number = data.get('card_number')
 
                 subtotal = Decimal('0.0')
                 for item in items_list:
-                    cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [item['upc']])
-                    price_row = cursor.fetchone()
-                    if not price_row:
+                    cursor.execute("""
+                        SELECT sp.selling_price, sp.products_number, p.product_name
+                        FROM StoreProduct sp
+                        JOIN Product p ON sp.id_product = p.id_product
+                        WHERE sp.upc = %s
+                    """, [item['upc']])
+                    prod_row = cursor.fetchone()
+
+                    if not prod_row:
                         raise Exception(f"Товар з UPC {item['upc']} не знайдено в магазині")
 
-                    price = Decimal(str(price_row[0]))
-                    subtotal += price * Decimal(str(item['quantity']))
+                    price = Decimal(str(prod_row[0]))
+                    stock = int(prod_row[1])
+                    prod_name = prod_row[2]
+                    quantity_to_buy = int(item['quantity'])
+
+                    if quantity_to_buy <= 0:
+                        raise Exception(f"Кількість товару «{prod_name}» у чеку повинна бути більшою за 0")
+
+                    if quantity_to_buy > stock:
+                        raise Exception(
+                            f"Недостатньо товару «{prod_name}» (UPC: {item['upc']}) на складі. "
+                            f"Доступно: {stock} од., запитано: {quantity_to_buy} од."
+                        )
+
+                    subtotal += price * Decimal(str(quantity_to_buy))
+
+                card_number = data.get('card_number')
+
+                if card_number and not card_number.strip():
+                    card_number = None
 
                 discount_percent = Decimal('0.0')
                 if card_number:
@@ -671,6 +711,8 @@ class CheckListAPIView(APIView):
                     card_row = cursor.fetchone()
                     if card_row:
                         discount_percent = Decimal(str(card_row[0]))
+                    else:
+                        raise Exception(f"Клієнтську картку з номером «{card_number}» не знайдено в базі даних")
 
                 multiplier = (Decimal('100') - discount_percent) / Decimal('100')
                 final_sum = subtotal * multiplier
@@ -990,6 +1032,14 @@ class StoreProductDetailAPIView(APIView):
                             data.get('promotional_product', False),
                             upc])
 
+                if not is_promo:
+                    new_promo_price = float(data.get('selling_price', 0)) * 0.8
+                    cursor.execute("""
+                        UPDATE StoreProduct
+                        SET selling_price = %s
+                        WHERE upc_prom = %s    
+                    """, [new_promo_price, upc])
+
                 return Response({"message": "Дані про товар у магазині оновлено"}, status=status.HTTP_200_OK)
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -1074,7 +1124,7 @@ class TotalSalesSummaryAPIView(APIView):
                            SUM( 
                                ROUND(
                                    (s.product_number * s.selling_price) / 
-                                   (SELECT SUM(s2.product_number * s2.selling_price) FROM Sale s2 WHERE s2.check_number = c.check_number) 
+                                   NULLIF((SELECT SUM(s2.product_number * s2.selling_price) FROM Sale s2 WHERE s2.check_number = c.check_number), 0) 
                                    * c.sum_total
                                , 4)
                            ) as total_product_revenue
