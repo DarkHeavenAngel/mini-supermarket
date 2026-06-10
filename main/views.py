@@ -714,18 +714,68 @@ class CheckDetailAPIView(APIView):
             cursor.execute("DELETE FROM StoreCheck WHERE check_number = %s", [check_number])
         return Response({"message": "Чек успішно видалено."}, status=status.HTTP_200_OK)
 
+def get_next_upc(is_promo, upc_prom=None):
+    if is_promo and upc_prom:
+        try:
+            return str(int(upc_prom) + 1)
+        except ValueError:
+            pass
+
+    with connection.cursor() as cursor:
+        try:
+            cursor.execute("SELECT upc FROM StoreProduct")
+            rows = cursor.fetchall()
+
+            max_odd_upc = 9999
+            max_even_upc = 10000
+
+            for row in rows:
+                try:
+                    num = int(row[0])
+                    if num % 2 != 0 and num > max_odd_upc:
+                        max_odd_upc = num
+                    elif num % 2 == 0 and num > max_even_upc:
+                        max_even_upc = num
+                except (ValueError, TypeError):
+                    pass
+
+            if not is_promo:
+                return str(max_odd_upc + 2)
+            else:
+                return str(max_even_upc + 2)
+
+        except Exception:
+            return "10002" if is_promo else "10001"
+
 #CRUD for store products
 class StoreProductListAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
 
     def get(self, request):
+        search = request.GET.get('search', '').strip()
+        sort_by = request.GET.get('sort', 'name')
+
+        query = """
+            SELECT sp.upc, sp.upc_prom, p.id_product, p.product_name, sp.selling_price,
+                   sp.products_number, sp.promotional_product
+            FROM StoreProduct sp
+            JOIN Product p ON sp.id_product = p.id_product
+            WHERE 1 = 1
+        """
+        params = []
+
+        if search:
+            query += " AND (LOWER(p.product_name) LIKE LOWER(%s) OR sp.upc LIKE %s)"
+            params.extend([f"%{search}%", f"%{search}%"])
+
+            # Сортування за кількістю або за назвою
+        if sort_by == 'qty':
+            query += " ORDER BY sp.products_number ASC"
+        else:
+            query += " ORDER BY p.product_name ASC"
+
         with connection.cursor() as cursor:
-            cursor.execute("""
-                SELECT sp.upc, sp.upc_prom, p.product_name, sp.selling_price,
-                       sp.products_number, sp.promotional_product
-                FROM StoreProduct sp
-                JOIN Product p ON sp.id_product = p.id_product
-            """)
+            cursor.execute(query, params)
             return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -734,13 +784,29 @@ class StoreProductListAPIView(APIView):
 
         data = request.data
         id_product = data.get('id_product')
-        promotional_product = data.get('promotional_product', False)
+        promotional_product = str(data.get('promotional_product')).lower() == 'true'
         upc_prom = data.get('upc_prom')
-        selling_price = data.get('selling_price', 0)
+        selling_price = data.get('selling_price')
+
+        if promotional_product and not upc_prom:
+            return Response({"error": "Неможливо створити акцію: відсутній оригінальний UPC звичайного товару!"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        upc = data.get('upc')
+        if not upc:
+            upc = get_next_upc(promotional_product, upc_prom)
+        else:
+            try:
+                upc_int = int(upc)
+                if promotional_product and upc_int % 2 != 0:
+                    return Response({"error": "Акційний товар повинен мати ПАРНИЙ UPC!"}, status=status.HTTP_400_BAD_REQUEST)
+                if not promotional_product and upc_int % 2 == 0:
+                    return Response({"error": "Звичайний товар повинен мати НЕПАРНИЙ UPC!"}, status=status.HTTP_400_BAD_REQUEST)
+            except ValueError:
+                pass
 
         with connection.cursor() as cursor:
             try:
-                # ЗАМІНА МЕТОДУ clean()
                 cursor.execute("SELECT promotional_product FROM StoreProduct WHERE id_product = %s", [id_product])
                 existing_records = cursor.fetchall()
 
@@ -755,25 +821,47 @@ class StoreProductListAPIView(APIView):
                         return Response(
                             {"error": f"Для цього товару вже існує {status_str} варіант. Оберіть інший статус"}, status=status.HTTP_400_BAD_REQUEST)
 
-                # ЗАМІНА МЕТОДУ save(): Автоматична знижка 20%
+                for row in existing_records:
+                    if row[0] == promotional_product:
+                        status_str = "акційний" if promotional_product else "звичайний"
+                        return Response(
+                            {"error": f"Для цього товару вже існує {status_str} варіант. Оберіть інший статус"},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+                    # Автоматична знижка 20% та перевірка кількості
                 if promotional_product and upc_prom:
-                    cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [upc_prom])
-                    base_price_row = cursor.fetchone()
-                    if base_price_row:
-                        base_price = float(base_price_row[0])
+                    cursor.execute("SELECT selling_price, products_number FROM StoreProduct WHERE upc = %s", [upc_prom])
+                    base_product_row = cursor.fetchone()
+
+                    if base_product_row:
+                        base_price = float(base_product_row[0])
+                        base_qty = int(base_product_row[1])
                         selling_price = base_price * 0.8
+
+                        # Перевірка кількості
+                        req_qty = int(data.get('products_number', 0))
+                        if req_qty > base_qty:
+                            return Response({
+                                "error": f"Кількість акційного товару ({req_qty}) не може бути більшою за залишок звичайного ({base_qty})!"
+                            }, status=status.HTTP_400_BAD_REQUEST)
 
                 cursor.execute("""
                     INSERT INTO StoreProduct (upc, upc_prom, id_product, selling_price, products_number, promotional_product)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, [
-                            data.get('upc'), upc_prom, id_product, selling_price, data.get('products_number'), promotional_product])
+                """, [ upc, upc_prom, id_product, selling_price, data.get('products_number'), promotional_product])
 
                 return Response({"message": "Товар успішно додано на полиці магазину"}, status=status.HTTP_201_CREATED)
+            except IntegrityError as e:
+                error_msg = str(e).lower()
 
-            except IntegrityError:
-                return Response({"error": "Такий UPC вже існує або вказано неіснуючий id_product"},
-                                status=status.HTTP_400_BAD_REQUEST)
+                if "unique" in error_msg or "primary key" in error_msg:
+                    return Response({"error": f"Товар з UPC «{data.get('upc')}» вже існує в базі! Придумайте інший."}, status=status.HTTP_400_BAD_REQUEST)
+
+                elif "upc_prom" in error_msg or "foreign key" in error_msg:
+                    return Response({"error": "Помилка зв'язку: Базовий товар не знайдено у базі."}, status=status.HTTP_400_BAD_REQUEST)
+
+                else:
+                    return Response({"error": f"Помилка бази даних: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
