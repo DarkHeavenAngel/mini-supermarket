@@ -789,6 +789,7 @@ class StoreProductListAPIView(APIView):
     def get(self, request):
         search = request.GET.get('search', '').strip()
         sort_by = request.GET.get('sort', 'name')
+        promo_filter = request.GET.get('promo', 'all')
 
         query = """
             SELECT sp.upc, sp.upc_prom, p.id_product, p.product_name, sp.selling_price,
@@ -802,6 +803,11 @@ class StoreProductListAPIView(APIView):
         if search:
             query += " AND (LOWER(p.product_name) LIKE LOWER(%s) OR sp.upc LIKE %s)"
             params.extend([f"%{search}%", f"%{search}%"])
+
+        if promo_filter == 'true':
+            query += " AND sp.promotional_product = TRUE"
+        elif promo_filter == 'false':
+            query += " AND sp.promotional_product = FALSE"
 
             # Сортування за кількістю або за назвою
         if sort_by == 'qty':
