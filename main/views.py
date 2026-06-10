@@ -813,6 +813,7 @@ class StoreProductListAPIView(APIView):
             cursor.execute(query, params)
             return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
 
+    @transaction.atomic
     def post(self, request):
         if request.user.empl_role != 'Менеджер':
             return Response({"detail": "Додавати товари в магазин можуть лише менеджери"}, status=status.HTTP_403_FORBIDDEN)
@@ -822,6 +823,8 @@ class StoreProductListAPIView(APIView):
         promotional_product = str(data.get('promotional_product')).lower() == 'true'
         upc_prom = data.get('upc_prom')
         selling_price = data.get('selling_price')
+
+        req_qty = int(data.get('products_number', 0))
 
         if promotional_product and not upc_prom:
             return Response({"error": "Неможливо створити акцію: відсутній оригінальний UPC звичайного товару!"},
@@ -874,11 +877,17 @@ class StoreProductListAPIView(APIView):
                         selling_price = base_price * 0.8
 
                         # Перевірка кількості
-                        req_qty = int(data.get('products_number', 0))
                         if req_qty > base_qty:
                             return Response({
                                 "error": f"Кількість акційного товару ({req_qty}) не може бути більшою за залишок звичайного ({base_qty})!"
                             }, status=status.HTTP_400_BAD_REQUEST)
+
+                         # СПИСАННЯ зі звичайного товару
+                        cursor.execute("""
+                            UPDATE StoreProduct
+                            SET products_number = products_number - %s
+                            WHERE upc = %s
+                        """, [req_qty, upc_prom])
 
                 cursor.execute("""
                     INSERT INTO StoreProduct (upc, upc_prom, id_product, selling_price, products_number, promotional_product)
