@@ -859,13 +859,6 @@ class StoreProductListAPIView(APIView):
                         return Response(
                             {"error": f"Для цього товару вже існує {status_str} варіант. Оберіть інший статус"}, status=status.HTTP_400_BAD_REQUEST)
 
-                for row in existing_records:
-                    if row[0] == promotional_product:
-                        status_str = "акційний" if promotional_product else "звичайний"
-                        return Response(
-                            {"error": f"Для цього товару вже існує {status_str} варіант. Оберіть інший статус"},
-                            status=status.HTTP_400_BAD_REQUEST)
-
                     # Автоматична знижка 20% та перевірка кількості
                 if promotional_product and upc_prom:
                     cursor.execute("SELECT selling_price, products_number FROM StoreProduct WHERE upc = %s", [upc_prom])
@@ -928,6 +921,7 @@ class StoreProductDetailAPIView(APIView):
 
         return Response(row[0], status=status.HTTP_200_OK)
 
+    @transaction.atomic
     def put(self, request, upc):
         if request.user.empl_role != 'Менеджер':
             return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
@@ -940,18 +934,45 @@ class StoreProductDetailAPIView(APIView):
 
         with connection.cursor() as cursor:
             try:
+                cursor.execute("SELECT products_number, promotional_product, upc_prom FROM StoreProduct WHERE upc = %s", [upc])
+                current_prod = cursor.fetchone()
+
+                if not current_prod:
+                    return Response({"detail": "Товар не знайдено для оновлення"}, status=status.HTTP_404_NOT_FOUND)
+
+                old_qty = int(current_prod[0])
+                is_promo = current_prod[1]
+                upc_prom = current_prod[2]
+                new_qty = int(data.get('products_number', old_qty))
+
+                if is_promo and upc_prom:
+                    qty_diff = new_qty - old_qty
+
+                    if qty_diff != 0:
+                        cursor.execute(" SELECT products_number FROM StoreProduct WHERE upc = %s", [upc_prom])
+                        base_prod = cursor.fetchone()
+
+                        if base_prod:
+                            base_qty = int(base_prod[0])
+
+                            if qty_diff > 0 and qty_diff > base_qty:
+                                return Response({"error": f"Недостатньо звичайного товару для збільшення акційної партії. Доступно: {base_qty} од."}, status=status.HTTP_400_BAD_REQUEST)
+
+                            cursor.execute("""
+                                UPDATE StoreProduct
+                                SET products_number = products_number - %s
+                                WHERE upc = %s
+                            """, [qty_diff, upc_prom])
+
                 cursor.execute("""
                     UPDATE StoreProduct
                     SET selling_price = %s, products_number = %s, promotional_product = %s
                     WHERE upc = %s
                 """, [
                             data.get('selling_price'),
-                            data.get('products_number'),
+                            new_qty,
                             data.get('promotional_product', False),
                             upc])
-
-                if cursor.rowcount == 0:
-                    return Response({"detail": "Товар не знайдено для оновлення"}, status=status.HTTP_404_NOT_FOUND)
 
                 return Response({"message": "Дані про товар у магазині оновлено"}, status=status.HTTP_200_OK)
             except Exception as e:
