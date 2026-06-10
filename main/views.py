@@ -972,12 +972,20 @@ class StoreProductDetailAPIView(APIView):
                                 WHERE upc = %s
                             """, [qty_diff, upc_prom])
 
+                final_selling_price = data.get('selling_price')
+
+                if is_promo and upc_prom:
+                    cursor.execute("SELECT selling_price FROM StoreProduct WHERE upc = %s", [upc_prom])
+                    base_price_row = cursor.fetchone()
+                    if base_price_row:
+                        final_selling_price = float(base_price_row[0]) * 0.8
+
                 cursor.execute("""
                     UPDATE StoreProduct
                     SET selling_price = %s, products_number = %s, promotional_product = %s
                     WHERE upc = %s
                 """, [
-                            data.get('selling_price'),
+                            final_selling_price,
                             new_qty,
                             data.get('promotional_product', False),
                             upc])
