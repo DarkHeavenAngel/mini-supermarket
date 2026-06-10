@@ -660,7 +660,6 @@ class StoreProductListAPIView(APIView):
             except Exception as e:
                 return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-
 class StoreProductDetailAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
 
