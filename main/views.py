@@ -938,6 +938,8 @@ class StoreProductDetailAPIView(APIView):
         if validation_error:
             return Response({"error": validation_error}, status=status.HTTP_400_BAD_REQUEST)
 
+        is_write_off = data.get('is_write_off', False)
+
         with connection.cursor() as cursor:
             try:
                 cursor.execute("SELECT products_number, promotional_product, upc_prom FROM StoreProduct WHERE upc = %s", [upc])
@@ -951,7 +953,7 @@ class StoreProductDetailAPIView(APIView):
                 upc_prom = current_prod[2]
                 new_qty = int(data.get('products_number', old_qty))
 
-                if is_promo and upc_prom:
+                if is_promo and upc_prom and not is_write_off:
                     qty_diff = new_qty - old_qty
 
                     if qty_diff != 0:
