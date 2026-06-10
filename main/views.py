@@ -728,9 +728,9 @@ class StoreProductDetailAPIView(APIView):
 # Reports
 class TotalSalesSummaryAPIView(APIView):
     """
-    Звіт: Загальна сума продажів за період часу.
-    всі касири, якщо id_employee не передано
-    конкретний касир, якщо передано id_employee
+    Звіт: Загальна сума продажів за період часу + список проданих товарів.
+    - всі касири, якщо id_employee не передано
+    - конкретний касир, якщо передано id_employee
     """
     permission_classes = [IsManager]
 
@@ -747,22 +747,69 @@ class TotalSalesSummaryAPIView(APIView):
         with connection.cursor() as cursor:
             if id_employee:
                 cursor.execute("""
-                    SELECT COALESCE(SUM(sum_total), 0) as total_revenue, COUNT(check_number)         as total_checks_printed
+                    SELECT COALESCE(SUM(sum_total), 0) as total_revenue, 
+                           COUNT(check_number) as total_checks_printed
                     FROM StoreCheck
-                    WHERE print_date >= %s
-                    AND print_date <= %s
-                    AND id_employee = %s
+                    WHERE print_date >= %s AND print_date <= %s AND id_employee = %s
                 """, [start_date, end_date_full, id_employee])
+                summary_row = dictfetchall(cursor)[0]
+
+                cursor.execute("""
+                    SELECT p.product_name, sp.upc, 
+                           SUM(s.product_number) as total_quantity,
+                           SUM( 
+                               ROUND(
+                                   (s.product_number * s.selling_price) / 
+                                   (SELECT SUM(s2.product_number * s2.selling_price) FROM Sale s2 WHERE s2.check_number = c.check_number) 
+                                   * c.sum_total
+                               , 4)
+                           ) as total_product_revenue
+                    FROM Sale s
+                    JOIN StoreCheck c ON s.check_number = c.check_number
+                    JOIN StoreProduct sp ON s.upc = sp.upc
+                    JOIN Product p ON sp.id_product = p.id_product
+                    WHERE c.print_date >= %s AND c.print_date <= %s AND c.id_employee = %s
+                    GROUP BY sp.upc, p.product_name
+                    ORDER BY total_product_revenue DESC
+                """, [start_date, end_date_full, id_employee])
+                products_rows = dictfetchall(cursor)
+
             else:
                 cursor.execute("""
-                    SELECT COALESCE(SUM(sum_total), 0) as total_revenue, COUNT(check_number)         as total_checks_printed
+                    SELECT COALESCE(SUM(sum_total), 0) as total_revenue, 
+                           COUNT(check_number) as total_checks_printed
                     FROM StoreCheck
-                    WHERE print_date >= %s
-                    AND print_date <= %s
+                    WHERE print_date >= %s AND print_date <= %s
                 """, [start_date, end_date_full])
+                summary_row = dictfetchall(cursor)[0]
 
-            row = dictfetchall(cursor)
-        return Response(row[0], status=status.HTTP_200_OK)
+                cursor.execute("""
+                    SELECT p.product_name, sp.upc, 
+                           SUM(s.product_number) as total_quantity,
+                           SUM( 
+                               ROUND(
+                                   (s.product_number * s.selling_price) / 
+                                   (SELECT SUM(s2.product_number * s2.selling_price) FROM Sale s2 WHERE s2.check_number = c.check_number) 
+                                   * c.sum_total
+                               , 4)
+                           ) as total_product_revenue
+                    FROM Sale s
+                    JOIN StoreCheck c ON s.check_number = c.check_number
+                    JOIN StoreProduct sp ON s.upc = sp.upc
+                    JOIN Product p ON sp.id_product = p.id_product
+                    WHERE c.print_date >= %s AND c.print_date <= %s
+                    GROUP BY sp.upc, p.product_name
+                    ORDER BY total_product_revenue DESC
+                """, [start_date, end_date_full])
+                products_rows = dictfetchall(cursor)
+
+        result = {
+            "total_revenue": summary_row["total_revenue"],
+            "total_checks_printed": summary_row["total_checks_printed"],
+            "sold_products": products_rows
+        }
+
+        return Response(result, status=status.HTTP_200_OK)
 
 class ProductSalesSummaryAPIView(APIView):
     """
