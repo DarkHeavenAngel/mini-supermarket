@@ -504,8 +504,9 @@ class DashboardStatsAPIView(APIView):
 
     def get(self, request):
         with connection.cursor() as cursor:
+            local_today = datetime.now().date()
             # Чеки
-            cursor.execute("SELECT COUNT(*) FROM StoreCheck WHERE DATE(print_date) = CURRENT_DATE;")
+            cursor.execute("SELECT COUNT(*) FROM StoreCheck WHERE DATE(print_date) = %s;", [local_today])
             checks_today = cursor.fetchone()[0]
 
             # Акційні товари
