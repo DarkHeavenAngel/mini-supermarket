@@ -40,15 +40,25 @@ def dictfetchall(cursor):
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 # перероблена глобальна валідація робітників для sql запитів
-def validate_employee_data(data, check_id=False):
+def validate_employee_data(data, check_id=False, check_password=False):
     id_employee = data.get('id_employee')
     phone_number = data.get('phone_number')
     date_of_birth = data.get('date_of_birth')
+    date_of_start = data.get('date_of_start')
     salary = data.get('salary')
+    password = data.get('password')
 
     # валідація ID при стоверні
     if check_id and not id_employee:
         return "Індентифікаційний номер сповробітника є обов'язковим"
+
+    # Валідація пароля (лише при створенні)
+    if check_password:
+        if not password or len(password) < 8:
+            return "Пароль повинен містити не менше 8 символів"
+        # Перевірка на наявність хоча б однієї літери та однієї цифри
+        if not re.search(r'[A-Za-z]', password) or not re.search(r'\d', password):
+            return "Пароль повинен містити хоча б одну літеру та одну цифру"
 
     # валідація телефону (не більше 13 символів + формат +380)
     if not phone_number or not re.match(r'^\+380\d{9}$', str(phone_number)):
@@ -62,22 +72,29 @@ def validate_employee_data(data, check_id=False):
         except (ValueError, TypeError, InvalidOperation):
             return "Некоректне значення заробітньої плати"
 
-    # валідація віку (не менше 18)
+    # Валідація віку НА МОМЕНТ ПОЧАТКУ РОБОТИ
     if not date_of_birth:
         return "Дата народження є обов'язковою"
+    if not date_of_start:
+        return "Дата початку роботи є обов'язковою"
+
     try:
         if isinstance(date_of_birth, str):
             born_date = datetime.strptime(date_of_birth, "%Y-%m-%d").date()
         else:
             born_date = date_of_birth
+
+        if isinstance(date_of_start, str):
+            start_date = datetime.strptime(date_of_start, "%Y-%m-%d").date()
+        else:
+            start_date = date_of_start
     except (ValueError, TypeError):
-        return "Некоректний формат дати народження. Використовуйте РРРР-ММ-ДД"
+        return "Некоректний формат дат. Використовуйте РРРР-ММ-ДД"
 
-    today = date.today()
-    age = today.year - born_date.year - ((today.month, today.day) < (born_date.month, born_date.day))
+    age_at_start = start_date.year - born_date.year - ((start_date.month, start_date.day) < (born_date.month, born_date.day))
 
-    if age < 18:
-        return "Вік працівника не може бути меншим за 18 років"
+    if age_at_start < 18:
+        return "На момент початку роботи працівнику має виповнитися 18 років, перевірте дату народження!"
 
     return None
 
@@ -146,7 +163,7 @@ class EmployeeListAPIView(APIView):
         data = request.data
 
         # виклик валідації працівника
-        validation_error = validate_employee_data(data, check_id=True)
+        validation_error = validate_employee_data(data, check_id=True, check_password=True)
         if validation_error:
             return Response({"error": validation_error}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -200,7 +217,7 @@ class EmployeeDetailAPIView(APIView):
         data = request.data
 
         # виклик валідації працівника
-        validation_error = validate_employee_data(data, check_id=True)
+        validation_error = validate_employee_data(data, check_id=True, check_password=True)
         if validation_error:
             return Response({"error": validation_error}, status=status.HTTP_400_BAD_REQUEST)
 
