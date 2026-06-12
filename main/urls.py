@@ -1,7 +1,8 @@
 from django.urls import path
 from main.views import EmployeeListAPIView, EmployeeDetailAPIView, CategoryListAPIView, CategoryDetailAPIView, \
     ProductListAPIView, ProductDetailAPIView, EmployeeProfileAPIView, DashboardStatsAPIView, CustomerCardListAPIView, \
-    CustomerCardDetailAPIView, CheckListAPIView, CheckDetailAPIView, StoreProductListAPIView, StoreProductDetailAPIView, TotalSalesSummaryAPIView, ProductSalesSummaryAPIView
+    CustomerCardDetailAPIView, CheckListAPIView, CheckDetailAPIView, StoreProductListAPIView, StoreProductDetailAPIView, \
+    TotalSalesSummaryAPIView, ProductSalesSummaryAPIView, TeamSpecificReportsAPIView
 
 urlpatterns = [
     path('employees/', EmployeeListAPIView.as_view(), name='employee-list'),
@@ -20,5 +21,6 @@ urlpatterns = [
     path('store_products/<str:upc>/', StoreProductDetailAPIView.as_view(), name='store-product-detail'),
     path('reports/total-sales/', TotalSalesSummaryAPIView.as_view(), name='report-total-sales'),
     path('reports/product-sales/', ProductSalesSummaryAPIView.as_view(), name='report-product-sales'),
+    path('reports/team/', TeamSpecificReportsAPIView.as_view(), name='report-team-queries'),
 ]
 

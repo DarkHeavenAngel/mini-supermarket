@@ -217,7 +217,7 @@ class EmployeeDetailAPIView(APIView):
         data = request.data
 
         # виклик валідації працівника
-        validation_error = validate_employee_data(data, check_id=True, check_password=True)
+        validation_error = validate_employee_data(data, check_id=True, check_password=False)
         if validation_error:
             return Response({"error": validation_error}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1150,4 +1150,73 @@ class ProductSalesSummaryAPIView(APIView):
                 {"id_product": id_product, "total_items_sold": 0, "message": "Товар не продавався у вказаний період"}, status=status.HTTP_200_OK)
 
         return Response(row[0], status=status.HTTP_200_OK)
-    
+
+class TeamSpecificReportsAPIView(APIView):
+    """
+    Звіт: Повний комплексний звіт з усіх запитів для конкретного члена команди.
+    Очікує параметр у форматі: ?author=olya
+    """
+    permission_classes = [IsManager]
+
+    def get(self, request):
+        author = request.query_params.get('author', '').lower()
+
+        if author == 'olha_mykhailyk':
+            return self.get_olyaMy_full_report()
+
+        # Місце для запитів інших членів команди:
+        # elif author == 'olha_marushchenko':
+        #     return self.get_olhaMa_queries(query_number)
+        # elif author == 'daria_melnyk':
+        #     return self.get_dariaMe_queries(query_number)
+
+        return Response(
+            {"error": "Вкажіть дійсного автора"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    def get_olyaMy_full_report(self):
+        with connection.cursor() as cursor:
+            # ЗАПИТ 1: Виручка та кількість проданих одиниць за категоріями
+            cursor.execute("""
+                SELECT 
+                    c.category_name AS "Назва категорії",
+                    SUM(s.product_number) AS "Продано одиниць",
+                    SUM(s.product_number * s.selling_price) AS "Загальна виручка"
+                FROM Category c
+                INNER JOIN Product p ON c.category_number = p.category_number
+                INNER JOIN StoreProduct sp ON p.id_product = sp.id_product
+                INNER JOIN Sale s ON sp.upc = s.upc
+                GROUP BY c.category_name
+                ORDER BY "Загальна виручка" DESC;
+            """)
+            category_sales = dictfetchall(cursor)
+
+            # ЗАПИТ 2: Реляційне ділення (чеки з усіма акційними товарами)
+            cursor.execute("""
+                SELECT 
+                    c.check_number AS "Номер чеку",
+                    c.print_date AS "Дата чеку",
+                    c.sum_total AS "Сума чеку",
+                    e.empl_surname AS "Прізвище касира"
+                FROM StoreCheck c
+                INNER JOIN Employee e ON c.id_employee = e.id_employee
+                WHERE NOT EXISTS (SELECT sp.upc
+                FROM StoreProduct sp
+                WHERE sp.promotional_product = TRUE
+                AND NOT EXISTS (SELECT s.upc
+                FROM Sale s
+                WHERE s.upc = sp.upc
+                AND s.check_number = c.check_number));
+            """)
+            all_promo_checks = dictfetchall(cursor)
+
+        # Формуємо єдину відповідь, де кожен запит має свій чіткий ключ
+        combined_data = {
+            "author": "Ольга Михайлик",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "category_sales_summary": category_sales,
+            "checks_with_all_promo_items": all_promo_checks
+        }
+
+        return Response(combined_data, status=status.HTTP_200_OK)
