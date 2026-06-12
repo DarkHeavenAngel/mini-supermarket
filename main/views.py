@@ -217,7 +217,7 @@ class EmployeeDetailAPIView(APIView):
         data = request.data
 
         # виклик валідації працівника
-        validation_error = validate_employee_data(data, check_id=True, check_password=True)
+        validation_error = validate_employee_data(data, check_id=True, check_password=False)
         if validation_error:
             return Response({"error": validation_error}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -475,11 +475,28 @@ class ProductDetailAPIView(APIView):
             return Response({"detail": "Видалення доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
 
         with connection.cursor() as cursor:
+            cursor.execute("""
+                           SELECT COUNT(*)
+                           FROM Sale s
+                                    JOIN StoreProduct sp ON s.upc = sp.upc
+                           WHERE sp.id_product = %s
+                           """, [id_product])
+
+            if cursor.fetchone()[0] > 0:
+                return Response({"error": "Неможливо видалити товар, оскільки він фігурує у пробитих чеках"},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+            cursor.execute("SELECT COUNT(*) FROM StoreProduct WHERE id_product = %s", [id_product])
+
+            if cursor.fetchone()[0] > 0:
+                return Response({"error": "Неможливо видалити товар з довідника, оскільки він уже доданий на полиці магазину"},
+                                status=status.HTTP_400_BAD_REQUEST)
+
             try:
                 cursor.execute("DELETE FROM Product WHERE id_product = %s", [id_product])
                 return Response(status=status.HTTP_204_NO_CONTENT)
-            except IntegrityError:
-                return Response({"error": "Неможливо видалити товар, він є в чеках"}, status=400)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 # Інформація для звіту на головній сторінці
 class DashboardStatsAPIView(APIView):
@@ -514,8 +531,8 @@ def validate_customer_data(data):
 
     try:
         percent = Decimal(str(data.get('percent', 0)))
-        if percent < 0 or percent > 100:
-            return "Відсоток знижки має бути від 0 до 100"
+        if percent < 5 or percent > 30:
+            return "Відсоток знижки має бути від 5 до 30"
     except (ValueError, TypeError, InvalidOperation):
         return "Некоректне значення відсотка"
 
