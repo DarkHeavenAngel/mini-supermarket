@@ -1163,10 +1163,10 @@ class TeamSpecificReportsAPIView(APIView):
 
         if author == 'olha_mykhailyk':
             return self.get_olyaMy_full_report()
+        elif author == 'olha_marushchenko':
+            return self.get_olhaMa_queries()
 
         # Місце для запитів інших членів команди:
-        # elif author == 'olha_marushchenko':
-        #     return self.get_olhaMa_queries(query_number)
         # elif author == 'daria_melnyk':
         #     return self.get_dariaMe_queries(query_number)
 
@@ -1219,4 +1219,44 @@ class TeamSpecificReportsAPIView(APIView):
             "checks_with_all_promo_items": all_promo_checks
         }
 
+        return Response(combined_data, status=status.HTTP_200_OK)
+
+    def get_olhaMa_queries(self):
+        with connection.cursor() as cursor:
+            # ЗАПИТ 1: Кількість чеків, створених кожним касиром
+            cursor.execute("""
+                           SELECT e.id_employee,
+                                  e.phone_number,
+                                  e.empl_surname,
+                                  e.empl_name,
+                                  COUNT(sc.check_number) AS total_checks
+                           FROM Employee e
+                                    JOIN StoreCheck sc ON sc.id_employee = e.id_employee
+                           GROUP BY e.id_employee, e.phone_number, e.empl_surname, e.empl_name
+                           ORDER BY total_checks DESC;
+                           """)
+            cashier_checks = dictfetchall(cursor)
+            # ЗАПИТ 2: Товари, які купували ВСІ клієнти з картками
+            cursor.execute("""
+                           SELECT DISTINCT p.product_name,
+                                           p.characteristics,
+                                           sp.selling_price
+                           FROM Product p
+                                    JOIN StoreProduct sp ON p.id_product = sp.id_product
+                           WHERE NOT EXISTS (SELECT cc.card_number
+                                             FROM CustomerCard cc
+                                             WHERE NOT EXISTS (SELECT sc.check_number
+                                                               FROM StoreCheck sc
+                                                                        JOIN Sale s ON sc.check_number = s.check_number
+                                                               WHERE s.upc = sp.upc
+                                                                 AND sc.card_number_id = cc.card_number));
+                           """)
+            products_for_card_holders = dictfetchall(cursor)
+
+        combined_data = {
+            "author": "Ольга Марущенко",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "cashier_check_counts": cashier_checks,
+            "products_bought_by_all_card_holders": products_for_card_holders
+        }
         return Response(combined_data, status=status.HTTP_200_OK)
