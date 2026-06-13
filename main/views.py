@@ -1222,8 +1222,16 @@ class TeamSpecificReportsAPIView(APIView):
         return Response(combined_data, status=status.HTTP_200_OK)
 
     def get_olhaMa_queries(self):
-        date_from = self.request.query_params.get("date_from", "2000-01-01")
-        date_to = self.request.query_params.get("date_to", "2100-12-31")
+        date_from = self.request.query_params.get("date_from")
+        date_to = self.request.query_params.get("date_to")
+
+        if not date_from or not date_to:
+            return Response(
+                {"error": "Вкажіть обидві дати: date_from та date_to (формат РРРР-ММ-ДД)"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        date_to_full = f"{date_to} 23:59:59"
         with connection.cursor() as cursor:
             # ЗАПИТ 1: Кількість чеків, створених кожним касиром
             cursor.execute("""
@@ -1240,7 +1248,7 @@ class TeamSpecificReportsAPIView(APIView):
                           GROUP BY e.id_employee, e.empl_surname, e.empl_name
                           HAVING COUNT(DISTINCT sc.check_number) > 0
                           ORDER BY total_revenue DESC;
-                           """,  [date_from, date_to])
+                           """,  [date_from, date_to_full])
             cashier_checks = dictfetchall(cursor)
             # ЗАПИТ 2: Товари, які купували ВСІ клієнти з картками
             cursor.execute("""
@@ -1248,14 +1256,13 @@ class TeamSpecificReportsAPIView(APIView):
                                            p.characteristics,
                                            sp.selling_price
                            FROM Product p
-                                    JOIN StoreProduct sp ON p.id_product = sp.id_product
-                           WHERE NOT EXISTS (SELECT cc.card_number
-                                             FROM CustomerCard cc
-                                             WHERE NOT EXISTS (SELECT sc.check_number
-                                                               FROM StoreCheck sc
-                                                                        JOIN Sale s ON sc.check_number = s.check_number
-                                                               WHERE s.upc = sp.upc
-                                                                 AND sc.card_number = cc.card_number));
+                           JOIN StoreProduct sp ON p.id_product = sp.id_product
+                                WHERE NOT EXISTS (SELECT cc.card_number
+                                FROM CustomerCard cc
+                                    WHERE NOT EXISTS (SELECT sc.check_number
+                                    FROM StoreCheck sc
+                                     JOIN Sale s ON sc.check_number = s.check_number
+                                     WHERE s.upc = sp.upc AND sc.card_number = cc.card_number));
                            """)
             products_for_card_holders = dictfetchall(cursor)
 
