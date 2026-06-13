@@ -1176,7 +1176,11 @@ class TeamSpecificReportsAPIView(APIView):
         )
 
     def get_olyaMy_full_report(self, request):
-        min_revenue = request.query_params.get('min_revenue', '0')
+        min_revenue_str = request.query_params.get('min_revenue', '0')
+        try:
+            min_revenue = float(min_revenue_str)
+        except ValueError:
+            min_revenue = 0.0
         with connection.cursor() as cursor:
             # ЗАПИТ 1: Виручка та кількість проданих одиниць за категоріями з відсіканням за мінімальною виручкою
             cursor.execute("""
