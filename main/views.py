@@ -1222,19 +1222,25 @@ class TeamSpecificReportsAPIView(APIView):
         return Response(combined_data, status=status.HTTP_200_OK)
 
     def get_olhaMa_queries(self):
+        date_from = self.request.query_params.get("date_from", "2000-01-01")
+        date_to = self.request.query_params.get("date_to", "2100-12-31")
         with connection.cursor() as cursor:
             # ЗАПИТ 1: Кількість чеків, створених кожним касиром
             cursor.execute("""
-                           SELECT e.id_employee,
-                                  e.phone_number,
-                                  e.empl_surname,
-                                  e.empl_name,
-                                  COUNT(sc.check_number) AS total_checks
-                           FROM Employee e
-                                    JOIN StoreCheck sc ON sc.id_employee = e.id_employee
-                           GROUP BY e.id_employee, e.phone_number, e.empl_surname, e.empl_name
-                           ORDER BY total_checks DESC;
-                           """)
+                          SELECT e.id_employee,
+                               e.empl_surname,
+                               e.empl_name,
+                               COUNT(DISTINCT sc.check_number) AS total_checks,
+                               SUM(s.product_number) AS total_items_sold,
+                               SUM(s.selling_price * s.product_number) AS total_revenue
+                          FROM Employee e
+                              JOIN StoreCheck sc ON sc.id_employee = e.id_employee
+                              JOIN Sale s ON s.check_number = sc.check_number
+                          WHERE sc.print_date BETWEEN %s AND %s
+                          GROUP BY e.id_employee, e.empl_surname, e.empl_name
+                          HAVING COUNT(DISTINCT sc.check_number) > 0
+                          ORDER BY total_revenue DESC;
+                           """,  [date_from, date_to])
             cashier_checks = dictfetchall(cursor)
             # ЗАПИТ 2: Товари, які купували ВСІ клієнти з картками
             cursor.execute("""
@@ -1249,7 +1255,7 @@ class TeamSpecificReportsAPIView(APIView):
                                                                FROM StoreCheck sc
                                                                         JOIN Sale s ON sc.check_number = s.check_number
                                                                WHERE s.upc = sp.upc
-                                                                 AND sc.card_number_id = cc.card_number));
+                                                                 AND sc.card_number = cc.card_number));
                            """)
             products_for_card_holders = dictfetchall(cursor)
 
