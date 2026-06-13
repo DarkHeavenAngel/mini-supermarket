@@ -1162,7 +1162,7 @@ class TeamSpecificReportsAPIView(APIView):
         author = request.query_params.get('author', '').lower()
 
         if author == 'olha_mykhailyk':
-            return self.get_olyaMy_full_report()
+            return self.get_olyaMy_full_report(request)
 
         # Місце для запитів інших членів команди:
         # elif author == 'olha_marushchenko':
@@ -1175,9 +1175,10 @@ class TeamSpecificReportsAPIView(APIView):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    def get_olyaMy_full_report(self):
+    def get_olyaMy_full_report(self, request):
+        min_revenue = request.query_params.get('min_revenue', '0')
         with connection.cursor() as cursor:
-            # ЗАПИТ 1: Виручка та кількість проданих одиниць за категоріями
+            # ЗАПИТ 1: Виручка та кількість проданих одиниць за категоріями з відсіканням за мінімальною виручкою
             cursor.execute("""
                 SELECT 
                     c.category_name AS "Назва категорії",
@@ -1188,8 +1189,9 @@ class TeamSpecificReportsAPIView(APIView):
                 INNER JOIN StoreProduct sp ON p.id_product = sp.id_product
                 INNER JOIN Sale s ON sp.upc = s.upc
                 GROUP BY c.category_name
+                HAVING SUM(s.product_number * s.selling_price) >= %s
                 ORDER BY "Загальна виручка" DESC;
-            """)
+            """, [min_revenue])
             category_sales = dictfetchall(cursor)
 
             # ЗАПИТ 2: Реляційне ділення (чеки з усіма акційними товарами)
