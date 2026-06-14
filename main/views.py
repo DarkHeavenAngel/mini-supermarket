@@ -1291,7 +1291,7 @@ class TeamSpecificReportsAPIView(APIView):
         author = request.query_params.get('author', '').lower()
 
         if author == 'olha_mykhailyk':
-            return self.get_olyaMy_full_report()
+            return self.get_olyaMy_full_report(request)
         elif author == 'olha_marushchenko':
             return self.get_olhaMa_queries()
         elif author == 'daria_melnyk':
