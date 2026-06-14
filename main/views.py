@@ -1174,9 +1174,14 @@ class TeamSpecificReportsAPIView(APIView):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    def get_olyaMy_full_report(self):
+    def get_olyaMy_full_report(self, request):
+        min_revenue_str = request.query_params.get('min_revenue', '0')
+        try:
+            min_revenue = float(min_revenue_str)
+        except ValueError:
+            min_revenue = 0.0
         with connection.cursor() as cursor:
-            # ЗАПИТ 1: Виручка та кількість проданих одиниць за категоріями
+            # ЗАПИТ 1: Виручка та кількість проданих одиниць за категоріями з відсіканням за мінімальною виручкою
             cursor.execute("""
                 SELECT 
                     c.category_name AS "Назва категорії",
@@ -1187,8 +1192,9 @@ class TeamSpecificReportsAPIView(APIView):
                 INNER JOIN StoreProduct sp ON p.id_product = sp.id_product
                 INNER JOIN Sale s ON sp.upc = s.upc
                 GROUP BY c.category_name
+                HAVING SUM(s.product_number * s.selling_price) >= %s
                 ORDER BY "Загальна виручка" DESC;
-            """)
+            """, [min_revenue])
             category_sales = dictfetchall(cursor)
 
             # ЗАПИТ 2: Реляційне ділення (чеки з усіма акційними товарами)
