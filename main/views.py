@@ -1279,4 +1279,178 @@ class ProductSalesSummaryAPIView(APIView):
                 {"id_product": id_product, "total_items_sold": 0, "message": "Товар не продавався у вказаний період"}, status=status.HTTP_200_OK)
 
         return Response(row[0], status=status.HTTP_200_OK)
-    
+
+class TeamSpecificReportsAPIView(APIView):
+    """
+    Звіт: Повний комплексний звіт з усіх запитів для конкретного члена команди.
+    Очікує параметр у форматі: ?author=olya
+    """
+    permission_classes = [IsManager]
+
+    def get(self, request):
+        author = request.query_params.get('author', '').lower()
+
+        if author == 'olha_mykhailyk':
+            return self.get_olyaMy_full_report()
+        elif author == 'olha_marushchenko':
+            return self.get_olhaMa_queries()
+        elif author == 'daria_melnyk':
+            category_id = request.query_params.get('category_id', 1)
+            return self.get_dariaMe_queries(category_id)
+
+        return Response(
+            {"error": "Вкажіть дійсного автора"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    def get_olyaMy_full_report(self, request):
+        min_revenue_str = request.query_params.get('min_revenue', '0')
+        try:
+            min_revenue = float(min_revenue_str)
+        except ValueError:
+            min_revenue = 0.0
+        with connection.cursor() as cursor:
+            # ЗАПИТ 1: Виручка та кількість проданих одиниць за категоріями з відсіканням за мінімальною виручкою
+            cursor.execute("""
+                SELECT 
+                    c.category_name AS "Назва категорії",
+                    SUM(s.product_number) AS "Продано одиниць",
+                    SUM(s.product_number * s.selling_price) AS "Загальна виручка"
+                FROM Category c
+                INNER JOIN Product p ON c.category_number = p.category_number
+                INNER JOIN StoreProduct sp ON p.id_product = sp.id_product
+                INNER JOIN Sale s ON sp.upc = s.upc
+                GROUP BY c.category_name
+                HAVING SUM(s.product_number * s.selling_price) >= %s
+                ORDER BY "Загальна виручка" DESC;
+            """, [min_revenue])
+            category_sales = dictfetchall(cursor)
+
+            # ЗАПИТ 2: Реляційне ділення (чеки з усіма акційними товарами)
+            cursor.execute("""
+                SELECT 
+                    c.check_number AS "Номер чеку",
+                    c.print_date AS "Дата чеку",
+                    c.sum_total AS "Сума чеку",
+                    e.empl_surname AS "Прізвище касира"
+                FROM StoreCheck c
+                INNER JOIN Employee e ON c.id_employee = e.id_employee
+                WHERE NOT EXISTS (SELECT sp.upc
+                FROM StoreProduct sp
+                WHERE sp.promotional_product = TRUE
+                AND NOT EXISTS (SELECT s.upc
+                FROM Sale s
+                WHERE s.upc = sp.upc
+                AND s.check_number = c.check_number));
+            """)
+            all_promo_checks = dictfetchall(cursor)
+
+        # Формуємо єдину відповідь, де кожен запит має свій чіткий ключ
+        combined_data = {
+            "author": "Ольга Михайлик",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "category_sales_summary": category_sales,
+            "checks_with_all_promo_items": all_promo_checks
+        }
+
+        return Response(combined_data, status=status.HTTP_200_OK)
+
+    def get_olhaMa_queries(self):
+        date_from = self.request.query_params.get("date_from")
+        date_to = self.request.query_params.get("date_to")
+
+        if not date_from or not date_to:
+            return Response(
+                {"error": "Вкажіть обидві дати: date_from та date_to (формат РРРР-ММ-ДД)"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        date_to_full = f"{date_to} 23:59:59"
+        with connection.cursor() as cursor:
+            # ЗАПИТ 1: Кількість чеків, створених кожним касиром
+            cursor.execute("""
+                          SELECT e.id_employee,
+                               e.empl_surname,
+                               e.empl_name,
+                               COUNT(DISTINCT sc.check_number) AS total_checks,
+                               SUM(s.product_number) AS total_items_sold,
+                               SUM(s.selling_price * s.product_number) AS total_revenue
+                          FROM Employee e
+                              JOIN StoreCheck sc ON sc.id_employee = e.id_employee
+                              JOIN Sale s ON s.check_number = sc.check_number
+                          WHERE sc.print_date BETWEEN %s AND %s
+                          GROUP BY e.id_employee, e.empl_surname, e.empl_name
+                          HAVING COUNT(DISTINCT sc.check_number) > 0
+                          ORDER BY total_revenue DESC;
+                           """,  [date_from, date_to_full])
+            cashier_checks = dictfetchall(cursor)
+            # ЗАПИТ 2: Товари, які купували ВСІ клієнти з картками
+            cursor.execute("""
+                           SELECT DISTINCT p.product_name,
+                                           p.characteristics,
+                                           sp.selling_price
+                           FROM Product p
+                           JOIN StoreProduct sp ON p.id_product = sp.id_product
+                                WHERE NOT EXISTS (SELECT cc.card_number
+                                FROM CustomerCard cc
+                                    WHERE NOT EXISTS (SELECT sc.check_number
+                                    FROM StoreCheck sc
+                                     JOIN Sale s ON sc.check_number = s.check_number
+                                     WHERE s.upc = sp.upc AND sc.card_number = cc.card_number));
+                           """)
+            products_for_card_holders = dictfetchall(cursor)
+
+        combined_data = {
+            "author": "Ольга Марущенко",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "cashier_check_counts": cashier_checks,
+            "products_bought_by_all_card_holders": products_for_card_holders
+        }
+        return Response(combined_data, status=status.HTTP_200_OK)
+
+    def get_dariaMe_queries(self, category_id):
+        with connection.cursor() as cursor:
+            # ЗАПИТ 1: Виручка касирів за конкретною категорією
+            cursor.execute("""
+                SELECT e.empl_surname AS "Прізвище", 
+                       e.empl_name AS "Ім'я", 
+                       SUM(s.product_number * s.selling_price) AS "Виручка з категорії"
+                FROM Employee e
+                INNER JOIN StoreCheck sc ON e.id_employee = sc.id_employee
+                INNER JOIN Sale s ON sc.check_number = s.check_number
+                INNER JOIN StoreProduct sp ON s.upc = sp.upc
+                INNER JOIN Product p ON sp.id_product = p.id_product
+                WHERE p.category_number = %s
+                GROUP BY e.id_employee, e.empl_surname, e.empl_name
+                ORDER BY "Виручка з категорії" DESC;
+            """, [category_id])
+            revenue_by_category = dictfetchall(cursor)
+
+            # ЗАПИТ 2: Товари, які продавали абсолютно всі касири
+            cursor.execute("""
+                SELECT p.product_name AS "Назва товару", 
+                       p.manufacturer AS "Виробник"
+                FROM Product p
+                WHERE NOT EXISTS (
+                    SELECT e.id_employee
+                    FROM Employee e
+                    WHERE e.empl_role = 'Касир'
+                    AND NOT EXISTS (
+                        SELECT s.upc
+                        FROM Sale s
+                        INNER JOIN StoreCheck sc ON s.check_number = sc.check_number
+                        INNER JOIN StoreProduct sp ON s.upc = sp.upc
+                        WHERE sc.id_employee = e.id_employee 
+                          AND sp.id_product = p.id_product
+                    )
+                );
+            """)
+            sold_by_all = dictfetchall(cursor)
+
+        combined_data = {
+            "author": "Дар'я Мельник",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "revenue_by_category": revenue_by_category,
+            "products_sold_by_all_cashiers": sold_by_all
+        }
+        return Response(combined_data, status=status.HTTP_200_OK)
