@@ -131,7 +131,7 @@ class EmployeeListAPIView(APIView):
     permission_classes = [IsManager]
 
     def get(self, request):
-        search = request.GET.get('search', '').strip()
+        search = request.GET.get('search', '').strip().lower()
         role = request.GET.get('role', '').strip()
 
         query = """
@@ -143,10 +143,6 @@ class EmployeeListAPIView(APIView):
         """
         params = []
 
-        if search:
-            query += " AND LOWER(empl_surname) LIKE LOWER(%s)"
-            params.append(f"{search}%")
-
         if role:
             query += " AND empl_role = %s"
             params.append(role)
@@ -157,6 +153,12 @@ class EmployeeListAPIView(APIView):
             cursor.execute(query, params)
             employees = dictfetchall(cursor)
 
+        if search:
+            filtered_employees = []
+            for emp in employees:
+                if search in emp['empl_surname'].lower():
+                    filtered_employees.append(emp)
+            return Response(filtered_employees, status=status.HTTP_200_OK)
         return Response(employees, status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -222,21 +224,24 @@ class EmployeeDetailAPIView(APIView):
             return Response({"error": validation_error}, status=status.HTTP_400_BAD_REQUEST)
 
         with connection.cursor() as cursor:
+            cursor.execute("SELECT id_employee FROM Employee WHERE id_employee = %s", [id_employee])
+            if not cursor.fetchone():
+                return Response({"detail": "Працівника не знайдено"}, status=status.HTTP_404_NOT_FOUND)
+
             try:
                 cursor.execute("""
                     UPDATE Employee SET 
                         empl_surname = %s, empl_name = %s, empl_patronymic = %s,
                         empl_role = %s, salary = %s, phone_number = %s,
-                        city = %s, street = %s, zip_code = %s
+                        city = %s, street = %s, zip_code = %s,
+                        date_of_birth = %s, date_of_start = %s
                     WHERE id_employee = %s
                 """, [
                     data.get('empl_surname'), data.get('empl_name'), data.get('empl_patronymic'),
                     data.get('empl_role'), data.get('salary'), data.get('phone_number'),
-                    data.get('city'), data.get('street'), data.get('zip_code'), id_employee
+                    data.get('city'), data.get('street'), data.get('zip_code'),
+                    data.get('date_of_birth'), data.get('date_of_start'), id_employee
                 ])
-
-                if cursor.rowcount == 0:
-                    return Response({"detail": "Працівника не знайдено"}, status=status.HTTP_404_NOT_FOUND)
 
                 return Response({"message": "Дані працівника оновлено"}, status=status.HTTP_200_OK)
             except Exception as e:
@@ -263,8 +268,8 @@ def validate_category_name(name):
     if not name:
         return "Назва категорії є обов'язковою."
 
-    if not re.match(r'^[A-Za-zА-Яа-яІіЇїЄєҐґ\s]+$', name):
-        return "Назва категорії повинна містити лише літери та пробіли (без цифр і символів)."
+    if not re.match(r"^[A-Za-zА-Яа-яІіЇїЄєҐґ\s'’\-]+$", name):
+        return "Назва категорії може містити лише літери, пробіли, апострофи та дефіси."
 
     return None
 
@@ -273,19 +278,20 @@ class CategoryListAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
 
     def get(self, request):
-        search = request.GET.get('search', '').strip()
-        query = "SELECT category_number, category_name FROM Category WHERE 1=1"
-        params = []
-
-        if search:
-            query += " AND LOWER(category_name) LIKE LOWER(%s)"
-            params.append(f"{search}%")
-
-        query += " ORDER BY category_name ASC"
+        search = request.GET.get('search', '').strip().lower()
+        query = "SELECT category_number, category_name FROM Category ORDER BY category_name ASC"
 
         with connection.cursor() as cursor:
-            cursor.execute(query, params)
+            cursor.execute(query)
             categories = dictfetchall(cursor)
+
+        if search:
+            filtered_categories = []
+            for cat in categories:
+                if search in cat['category_name'].lower():
+                    filtered_categories.append(cat)
+
+            return Response(filtered_categories, status=status.HTTP_200_OK)
         return Response(categories, status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -300,6 +306,13 @@ class CategoryListAPIView(APIView):
             return Response({"error": name_error}, status=status.HTTP_400_BAD_REQUEST)
 
         with connection.cursor() as cursor:
+            cursor.execute("SELECT category_name FROM Category")
+            existing_categories = cursor.fetchall()
+
+            for row in existing_categories:
+                if row[0].lower() == category_name.lower():
+                    return Response({"error": f"Категорія з назвою «{category_name}» вже існує!"}, status=status.HTTP_400_BAD_REQUEST)
+
             try:
                 cursor.execute("SELECT MAX(category_number) FROM Category")
                 max_id = cursor.fetchone()[0]
@@ -308,7 +321,7 @@ class CategoryListAPIView(APIView):
                 cursor.execute("""
                                INSERT INTO Category (category_number, category_name)
                                VALUES (%s, %s)
-                               """, [next_id, data.get('category_name')])
+                               """, [next_id, category_name])
 
                 return Response({"message": "Категорію успішно створено"}, status=status.HTTP_201_CREATED)
             except Exception as e:
@@ -341,12 +354,19 @@ class CategoryDetailAPIView(APIView):
             return Response({"error": name_error}, status=status.HTTP_400_BAD_REQUEST)
 
         with connection.cursor() as cursor:
+            cursor.execute("SELECT category_name FROM Category WHERE category_number != %s", [category_number])
+            existing_categories = cursor.fetchall()
+
+            for row in existing_categories:
+                if row[0].lower() == category_name.lower():
+                    return Response({"error": f"Інша категорія з назвою «{category_name}» вже існує!"}, status=status.HTTP_400_BAD_REQUEST)
+
             try:
                 cursor.execute("""
                     UPDATE Category 
                     SET category_name = %s 
                     WHERE category_number = %s
-                """, [data.get('category_name'), category_number])
+                """, [category_name, category_number])
 
                 if cursor.rowcount == 0:
                     return Response({"detail": "Категорію не знайдено."}, status=status.HTTP_404_NOT_FOUND)
@@ -379,7 +399,7 @@ class ProductListAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
 
     def get(self, request):
-        search = request.GET.get('search', '').strip()
+        search = request.GET.get('search', '').strip().lower()
         category = request.GET.get('category', '').strip()
 
         query = """
@@ -390,11 +410,6 @@ class ProductListAPIView(APIView):
             WHERE 1 = 1
         """
         params = []
-
-        # Пошук за назвою товару
-        if search:
-            query += " AND LOWER(p.product_name) LIKE LOWER(%s)"
-            params.append(f"{search}%")
 
         # Фільтрація за категорією
         if category:
@@ -408,6 +423,12 @@ class ProductListAPIView(APIView):
                 cursor.execute(query, params)
                 products = dictfetchall(cursor)
 
+                if search:
+                    filtered_products = []
+                    for prod in products:
+                        if search in prod['product_name'].lower():
+                            filtered_products.append(prod)
+                    return Response(filtered_products, status=status.HTTP_200_OK)
                 return Response(products, status=status.HTTP_200_OK)
 
             except Exception as e:
@@ -419,14 +440,30 @@ class ProductListAPIView(APIView):
             return Response({"detail": "Додавати товари можуть лише менеджери"}, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data
+        product_name = data.get('product_name', '').strip()
+
+        if not product_name:
+            return Response({"error": "Назва товару є обов'язковою"}, status=status.HTTP_400_BAD_REQUEST)
+
         with connection.cursor() as cursor:
+            cursor.execute("SELECT product_name FROM Product")
+            existing_products = cursor.fetchall()
+
+            for row in existing_products:
+                if row[0].lower() == product_name.lower():
+                    return Response({"error": f"Товар з назвою «{product_name}» вже існує в довіднику!"}, status=status.HTTP_400_BAD_REQUEST)
+
             try:
+                cursor.execute("SELECT MAX(id_product) FROM Product")
+                max_id = cursor.fetchone()[0]
+                next_id = (max_id or 0) + 1
+
                 cursor.execute("""
                     INSERT INTO Product (id_product, category_number, product_name, characteristics, manufacturer)
                     VALUES (%s, %s, %s, %s, %s)
                 """, [
-                    data.get('id_product'), data.get('category_number'),
-                    data.get('product_name'), data.get('characteristics'), data.get('manufacturer')
+                    next_id, data.get('category_number'),
+                    product_name, data.get('characteristics'), data.get('manufacturer')
                 ])
 
                 return Response({"message": "Товар успішно створено"}, status=status.HTTP_201_CREATED)
@@ -456,19 +493,34 @@ class ProductDetailAPIView(APIView):
             return Response({"detail": "Редагування доступне лише менеджерам"}, status=status.HTTP_403_FORBIDDEN)
 
         data = request.data
+        product_name = data.get('product_name', '').strip()
+
+        if not product_name:
+            return Response({"error": "Назва товару є обов'язковою"}, status=status.HTTP_400_BAD_REQUEST)
+
         with connection.cursor() as cursor:
+            cursor.execute("SELECT product_name FROM Product WHERE id_product != %s", [id_product])
+            existing_products = cursor.fetchall()
+
+            for row in existing_products:
+                if row[0].lower() == product_name.lower():
+                    return Response({"error": f"Інший товар з назвою «{product_name}» вже існує в довіднику!"},
+                                    status=status.HTTP_400_BAD_REQUEST)
+
             try:
                 cursor.execute("""
                     UPDATE Product 
                     SET category_number = %s, product_name = %s, characteristics = %s, manufacturer = %s 
                     WHERE id_product = %s
                 """, [
-                    data.get('category_number'), data.get('product_name'),
+                    data.get('category_number'), product_name,
                     data.get('characteristics'), data.get('manufacturer'), id_product
                 ])
                 return Response({"message": "Товар оновлено"}, status=status.HTTP_200_OK)
             except IntegrityError:
                 return Response({"error": "Вказаної категорії не існує"}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, id_product):
         if request.user.empl_role != 'Менеджер':
@@ -544,7 +596,7 @@ class CustomerCardListAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
 
     def get(self, request):
-        search = request.GET.get('search', '').strip()
+        search = request.GET.get('search', '').strip().lower()
         percent = request.GET.get('percent', '').strip()
 
         query = """
@@ -554,9 +606,6 @@ class CustomerCardListAPIView(APIView):
             WHERE 1 = 1
         """
         params = []
-        if search:
-            query += " AND LOWER(cust_surname) LIKE LOWER(%s)"
-            params.append(f"{search}%")
 
         if percent:
             query += " AND percent = %s"
@@ -566,7 +615,15 @@ class CustomerCardListAPIView(APIView):
 
         with connection.cursor() as cursor:
             cursor.execute(query, params)
-            return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
+            cards = dictfetchall(cursor)
+
+        if search:
+            filtered_cards = []
+            for card in cards:
+                if search in card['cust_surname'].lower():
+                    filtered_cards.append(card)
+            return Response(filtered_cards, status=status.HTTP_200_OK)
+        return Response(cards, status=status.HTTP_200_OK)
 
     def post(self, request):
         data = request.data
@@ -864,7 +921,7 @@ class StoreProductListAPIView(APIView):
     permission_classes = [IsManager | IsCashier]
 
     def get(self, request):
-        search = request.GET.get('search', '').strip()
+        search = request.GET.get('search', '').strip().lower()
         sort_by = request.GET.get('sort', 'name')
         promo_filter = request.GET.get('promo', 'all')
 
@@ -876,10 +933,6 @@ class StoreProductListAPIView(APIView):
             WHERE 1 = 1
         """
         params = []
-
-        if search:
-            query += " AND (LOWER(p.product_name) LIKE LOWER(%s) OR sp.upc LIKE %s)"
-            params.extend([f"%{search}%", f"%{search}%"])
 
         if promo_filter == 'true':
             query += " AND sp.promotional_product = TRUE"
@@ -894,7 +947,15 @@ class StoreProductListAPIView(APIView):
 
         with connection.cursor() as cursor:
             cursor.execute(query, params)
-            return Response(dictfetchall(cursor), status=status.HTTP_200_OK)
+            store_products = dictfetchall(cursor)
+
+        if search:
+            filtered_sp = []
+            for sp in store_products:
+                if search in sp['product_name'].lower() or search in str(sp['upc']):
+                    filtered_sp.append(sp)
+            return Response(filtered_sp, status=status.HTTP_200_OK)
+        return Response(store_products, status=status.HTTP_200_OK)
 
     @transaction.atomic
     def post(self, request):
