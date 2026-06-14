@@ -1165,10 +1165,9 @@ class TeamSpecificReportsAPIView(APIView):
             return self.get_olyaMy_full_report()
         elif author == 'olha_marushchenko':
             return self.get_olhaMa_queries()
-
-        # Місце для запитів інших членів команди:
-        # elif author == 'daria_melnyk':
-        #     return self.get_dariaMe_queries(query_number)
+        elif author == 'daria_melnyk':
+            category_id = request.query_params.get('category_id', 1)
+            return self.get_dariaMe_queries(category_id)
 
         return Response(
             {"error": "Вкажіть дійсного автора"},
@@ -1271,5 +1270,52 @@ class TeamSpecificReportsAPIView(APIView):
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "cashier_check_counts": cashier_checks,
             "products_bought_by_all_card_holders": products_for_card_holders
+        }
+        return Response(combined_data, status=status.HTTP_200_OK)
+
+    def get_dariaMe_queries(self, category_id):
+        with connection.cursor() as cursor:
+            # ЗАПИТ 1: Виручка касирів за конкретною категорією
+            cursor.execute("""
+                SELECT e.empl_surname AS "Прізвище", 
+                       e.empl_name AS "Ім'я", 
+                       SUM(s.product_number * s.selling_price) AS "Виручка з категорії"
+                FROM Employee e
+                INNER JOIN StoreCheck sc ON e.id_employee = sc.id_employee
+                INNER JOIN Sale s ON sc.check_number = s.check_number
+                INNER JOIN StoreProduct sp ON s.upc = sp.upc
+                INNER JOIN Product p ON sp.id_product = p.id_product
+                WHERE p.category_number = %s
+                GROUP BY e.id_employee, e.empl_surname, e.empl_name
+                ORDER BY "Виручка з категорії" DESC;
+            """, [category_id])
+            revenue_by_category = dictfetchall(cursor)
+
+            # ЗАПИТ 2: Товари, які продавали абсолютно всі касири
+            cursor.execute("""
+                SELECT p.product_name AS "Назва товару", 
+                       p.manufacturer AS "Виробник"
+                FROM Product p
+                WHERE NOT EXISTS (
+                    SELECT e.id_employee
+                    FROM Employee e
+                    WHERE e.empl_role = 'Касир'
+                    AND NOT EXISTS (
+                        SELECT s.upc
+                        FROM Sale s
+                        INNER JOIN StoreCheck sc ON s.check_number = sc.check_number
+                        INNER JOIN StoreProduct sp ON s.upc = sp.upc
+                        WHERE sc.id_employee = e.id_employee 
+                          AND sp.id_product = p.id_product
+                    )
+                );
+            """)
+            sold_by_all = dictfetchall(cursor)
+
+        combined_data = {
+            "author": "Дар'я Мельник",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "revenue_by_category": revenue_by_category,
+            "products_sold_by_all_cashiers": sold_by_all
         }
         return Response(combined_data, status=status.HTTP_200_OK)
