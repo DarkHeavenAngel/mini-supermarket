@@ -1162,13 +1162,12 @@ class TeamSpecificReportsAPIView(APIView):
         author = request.query_params.get('author', '').lower()
 
         if author == 'olha_mykhailyk':
-            return self.get_olyaMy_full_report(request)
-
-        # Місце для запитів інших членів команди:
-        # elif author == 'olha_marushchenko':
-        #     return self.get_olhaMa_queries(query_number)
-        # elif author == 'daria_melnyk':
-        #     return self.get_dariaMe_queries(query_number)
+            return self.get_olyaMy_full_report()
+        elif author == 'olha_marushchenko':
+            return self.get_olhaMa_queries()
+        elif author == 'daria_melnyk':
+            category_id = request.query_params.get('category_id', 1)
+            return self.get_dariaMe_queries(category_id)
 
         return Response(
             {"error": "Вкажіть дійсного автора"},
@@ -1225,4 +1224,104 @@ class TeamSpecificReportsAPIView(APIView):
             "checks_with_all_promo_items": all_promo_checks
         }
 
+        return Response(combined_data, status=status.HTTP_200_OK)
+
+    def get_olhaMa_queries(self):
+        date_from = self.request.query_params.get("date_from")
+        date_to = self.request.query_params.get("date_to")
+
+        if not date_from or not date_to:
+            return Response(
+                {"error": "Вкажіть обидві дати: date_from та date_to (формат РРРР-ММ-ДД)"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        date_to_full = f"{date_to} 23:59:59"
+        with connection.cursor() as cursor:
+            # ЗАПИТ 1: Кількість чеків, створених кожним касиром
+            cursor.execute("""
+                          SELECT e.id_employee,
+                               e.empl_surname,
+                               e.empl_name,
+                               COUNT(DISTINCT sc.check_number) AS total_checks,
+                               SUM(s.product_number) AS total_items_sold,
+                               SUM(s.selling_price * s.product_number) AS total_revenue
+                          FROM Employee e
+                              JOIN StoreCheck sc ON sc.id_employee = e.id_employee
+                              JOIN Sale s ON s.check_number = sc.check_number
+                          WHERE sc.print_date BETWEEN %s AND %s
+                          GROUP BY e.id_employee, e.empl_surname, e.empl_name
+                          HAVING COUNT(DISTINCT sc.check_number) > 0
+                          ORDER BY total_revenue DESC;
+                           """,  [date_from, date_to_full])
+            cashier_checks = dictfetchall(cursor)
+            # ЗАПИТ 2: Товари, які купували ВСІ клієнти з картками
+            cursor.execute("""
+                           SELECT DISTINCT p.product_name,
+                                           p.characteristics,
+                                           sp.selling_price
+                           FROM Product p
+                           JOIN StoreProduct sp ON p.id_product = sp.id_product
+                                WHERE NOT EXISTS (SELECT cc.card_number
+                                FROM CustomerCard cc
+                                    WHERE NOT EXISTS (SELECT sc.check_number
+                                    FROM StoreCheck sc
+                                     JOIN Sale s ON sc.check_number = s.check_number
+                                     WHERE s.upc = sp.upc AND sc.card_number = cc.card_number));
+                           """)
+            products_for_card_holders = dictfetchall(cursor)
+
+        combined_data = {
+            "author": "Ольга Марущенко",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "cashier_check_counts": cashier_checks,
+            "products_bought_by_all_card_holders": products_for_card_holders
+        }
+        return Response(combined_data, status=status.HTTP_200_OK)
+
+    def get_dariaMe_queries(self, category_id):
+        with connection.cursor() as cursor:
+            # ЗАПИТ 1: Виручка касирів за конкретною категорією
+            cursor.execute("""
+                SELECT e.empl_surname AS "Прізвище", 
+                       e.empl_name AS "Ім'я", 
+                       SUM(s.product_number * s.selling_price) AS "Виручка з категорії"
+                FROM Employee e
+                INNER JOIN StoreCheck sc ON e.id_employee = sc.id_employee
+                INNER JOIN Sale s ON sc.check_number = s.check_number
+                INNER JOIN StoreProduct sp ON s.upc = sp.upc
+                INNER JOIN Product p ON sp.id_product = p.id_product
+                WHERE p.category_number = %s
+                GROUP BY e.id_employee, e.empl_surname, e.empl_name
+                ORDER BY "Виручка з категорії" DESC;
+            """, [category_id])
+            revenue_by_category = dictfetchall(cursor)
+
+            # ЗАПИТ 2: Товари, які продавали абсолютно всі касири
+            cursor.execute("""
+                SELECT p.product_name AS "Назва товару", 
+                       p.manufacturer AS "Виробник"
+                FROM Product p
+                WHERE NOT EXISTS (
+                    SELECT e.id_employee
+                    FROM Employee e
+                    WHERE e.empl_role = 'Касир'
+                    AND NOT EXISTS (
+                        SELECT s.upc
+                        FROM Sale s
+                        INNER JOIN StoreCheck sc ON s.check_number = sc.check_number
+                        INNER JOIN StoreProduct sp ON s.upc = sp.upc
+                        WHERE sc.id_employee = e.id_employee 
+                          AND sp.id_product = p.id_product
+                    )
+                );
+            """)
+            sold_by_all = dictfetchall(cursor)
+
+        combined_data = {
+            "author": "Дар'я Мельник",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "revenue_by_category": revenue_by_category,
+            "products_sold_by_all_cashiers": sold_by_all
+        }
         return Response(combined_data, status=status.HTTP_200_OK)
